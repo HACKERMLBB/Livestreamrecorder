@@ -1,15 +1,35 @@
 import os
+import threading
 import subprocess
 import requests
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ===== CONFIG - FILL YOUR DETAILS HERE =====
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-MIXDROP_EMAIL = "YOUR_MIXDROP_EMAIL"
-MIXDROP_KEY = "YOUR_MIXDROP_API_KEY"
-CHANNEL_ID = "@YOUR_CHANNEL_USERNAME"
-# ============================================
+# ===== FAKE WEB SERVER FOR RENDER FREE WEB SERVICE =====
+app_web = Flask(__name__)
+
+@app_web.route("/")
+def home():
+    return "Bot is running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app_web.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_web, daemon=True).start()
+# =======================================================
+
+# ===== CONFIG FROM RENDER ENV VARS =====
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+MIXDROP_EMAIL = os.environ.get("MIXDROP_EMAIL")
+MIXDROP_KEY = os.environ.get("MIXDROP_KEY")
+CHANNEL_ID = os.environ.get("CHANNEL_ID")
+# ========================================
+
+# ===== PRIVATE LOCK - ONLY YOU CAN USE BOT =====
+ALLOWED_USERS = [7038888904]
+# ================================================
 
 def upload_mixdrop(file_path):
     print(f"Uploading {file_path} to Mixdrop...")
@@ -18,7 +38,7 @@ def upload_mixdrop(file_path):
             "https://api.mixdrop.ag/upload",
             files={"file": f},
             data={"email": MIXDROP_EMAIL, "key": MIXDROP_KEY},
-            timeout=600
+            timeout=1200
         )
     data = response.json()
     print(data)
@@ -26,11 +46,20 @@ def upload_mixdrop(file_path):
     return result.get("url") or data.get("url")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ALLOWED_USERS:
+        await update.message.reply_text("Sorry, this bot is private.")
+        return
     await update.message.reply_text(
-        "Hi! Send your Live stream link chaturbate/cam4/camsoda/bongacams/ stripchat not working , I will record it, upload to Mixdrop and post the link to the channel."
+        "Hi! Send any Live link, I will record it, upload to Mixdrop and post the link to the channel."
     )
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ALLOWED_USERS:
+        await update.message.reply_text("Sorry, this bot is private.")
+        return
+
     url = update.message.text.strip()
     if "http" not in url:
         return
@@ -38,19 +67,32 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Recording live... Uploading to Mixdrop, please wait.")
 
     try:
-        # 1. Download in 480p
+        # ===== SAME AS TERMUX - NO -f, BEST AVAILABLE QUALITY =====
         subprocess.run(
-            ["yt-dlp", "-f", "best[height<=480]", "-o", "full.mp4", url],
+            ["yt-dlp", "-o", "%(title)s.%(ext)s", url],
             check=True
         )
 
-        # 2. Create thumbnail from 10th second
+        # Find downloaded file
+        downloaded_file = None
+        for f in os.listdir("."):
+            if f.endswith((".mp4", ".mkv", ".webm", ".ts")):
+                downloaded_file = f
+                break
+
+        if not downloaded_file:
+            await update.message.reply_text("Download failed, file not found.")
+            return
+
+        # Rename to full.mp4 for next steps
+        if downloaded_file != "full.mp4":
+            os.rename(downloaded_file, "full.mp4")
+
         subprocess.run(
             ["ffmpeg", "-y", "-ss", "10", "-i", "full.mp4", "-vframes", "1", "thumb.jpg"],
             check=True
         )
 
-        # 3. Create 5 minute highlights from start
         subprocess.run(
             ["ffmpeg", "-y", "-ss", "0", "-i", "full.mp4", "-t", "300", "-c", "copy", "highlights.mp4"],
             check=True
@@ -58,14 +100,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text("Uploading to Mixdrop...")
 
-        # 4. Upload to Mixdrop
         full_link = upload_mixdrop("full.mp4")
         highlights_link = upload_mixdrop("highlights.mp4")
 
-        # 5. Post to Telegram Channel
         caption = (
             "NEW LIVE RECORDING\n\n"
-            f"Full Video (480p): {full_link}\n"
+            f"Full Video: {full_link}\n"
             f"Highlights (5 Min): {highlights_link}\n\n"
             "#Live #Recorded"
         )
@@ -77,11 +117,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=caption
             )
 
-        await update.message.reply_text(
-            f"Done! Posted to channel.\nFull: {full_link}"
-        )
+        await update.message.reply_text(f"Done! Posted to channel.\nFull: {full_link}")
 
-        # 6. Delete local files to save phone storage
         for file_name in ["full.mp4", "highlights.mp4", "thumb.jpg"]:
             if os.path.exists(file_name):
                 os.remove(file_name)
