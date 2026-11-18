@@ -1,273 +1,200 @@
 import os
-import threading
-import subprocess
-import requests
-import json
 import asyncio
-import uuid
-import shutil
-from flask import Flask
+import subprocess
+import glob
+import requests
+import time
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-# ======================================================
-# 🌐 FAKE WEB SERVER FOR RENDER - KEEPS BOT ALIVE
-# ======================================================
-app_web = Flask(__name__)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+MIXDROP_EMAIL = os.getenv("MIXDROP_EMAIL")
+MIXDROP_KEY = os.getenv("MIXDROP_KEY")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+ALLOWED_USERS = [7038888904]
 
-@app_web.route("/")
-def home():
-    return "✅ Bot is running!"
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app_web.run(host="0.0.0.0", port=port)
+MAX_BYTES = 500 * 1024 * 1024
 
-threading.Thread(target=run_web, daemon=True).start()
-# ======================================================
-
-# 🔑 CONFIG - FROM RENDER ENV VARIABLES
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MIXDROP_EMAIL = os.environ.get("MIXDROP_EMAIL")
-MIXDROP_KEY = os.environ.get("MIXDROP_KEY")
-CHANNEL_ID = os.environ.get("CHANNEL_ID")
-ALLOWED_USERS = [7038888904]  # 👤 Put Your Telegram ID Here
-
-# 📥 UPLOAD QUEUE - Upload One By One
-upload_queue = asyncio.Queue()
-
-# ======================================================
-# ☁️ UPLOAD TO MIXDROP
-# ======================================================
 def upload_mixdrop(file_path):
-    size_mb = os.path.getsize(file_path) / 1024 / 1024
-    print(f"☁️ Uploading {file_path} - {size_mb:.1f} MB", flush=True)
-    with open(file_path, "rb") as f:
-        response = requests.post(
-            "https://api.mixdrop.ag/upload",
-            files={"file": f},
-            data={"email": MIXDROP_EMAIL, "key": MIXDROP_KEY},
-            timeout=3600
-        )
-    print(f"📩 Mixdrop Response: {response.text[:500]}", flush=True)
-    try:
-        data = response.json()
-    except:
-        return None
-    result = data.get("result", {})
-    return result.get("url") or data.get("url")
-
-# ======================================================
-# ⏱️ GET VIDEO DURATION
-# ======================================================
-def get_duration(file_path):
-    try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", file_path],
-            capture_output=True, text=True
-        )
-        data = json.loads(result.stdout)
-        return float(data["format"]["duration"])
-    except:
-        return 0
-
-def run_cmd(cmd):
-    subprocess.run(cmd, check=True)
-
-# ======================================================
-# 📥 YT-DLP - TRY ALL METHODS ONE BY ONE
-# ======================================================
-def download_with_ytdlp(url, folder):
-    out = os.path.join(folder, "%(title)s.%(ext)s")
-
-    attempts = [
-        # 1️⃣ SIMPLEST - Just yt-dlp "link"
-        ["yt-dlp", "-o", out, url],
-
-        # 2️⃣ LIVE - From Start, Convert To MP4
-        ["yt-dlp", "--no-playlist", "--live-from-start", "--merge-output-format", "mp4",
-         "--remux-video", "mp4", "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-         "-o", out, url],
-
-        # 3️⃣ BEST MP4 ONLY - For YouTube / Facebook Live
-        ["yt-dlp", "--no-playlist", "-f", "best[ext=mp4]/best",
-         "--merge-output-format", "mp4",
-         "-o", out, url],
-
-        # 4️⃣ BEST ANY FORMAT - For TikTok / Instagram / Reels
-        ["yt-dlp", "--no-playlist", "-f", "best",
-         "-o", out, url],
-
-        # 5️⃣ BYPASS BLOCK - Chrome + Android Player
-        ["yt-dlp", "--no-playlist", "--impersonate", "chrome",
-         "--extractor-args", "youtube:player_client=android",
-         "-f", "best[height<=720]/best",
-         "-o", out, url],
-
-        # 6️⃣ RAW - No Checks, Last Try
-        ["yt-dlp", "--no-playlist", "--no-check-certificates",
-         "-o", out, url],
-    ]
-
-    for i, cmd in enumerate(attempts):
-        print(f"🔄 Trying yt-dlp Method {i+1}...", flush=True)
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        files = [f for f in os.listdir(folder) if f.endswith((".mp4", ".mkv", ".webm", ".ts", ".mov"))]
-        if files and result.returncode == 0:
-            print(f"✅ Success With Method {i+1}", flush=True)
-            return True
-        print(f"❌ Method {i+1} Failed", flush=True)
-
-    print("❌ All yt-dlp Methods Failed", flush=True)
-    return False
-
-# ======================================================
-# ☁️ UPLOAD WORKER - ONE UPLOAD AT A TIME
-# ======================================================
-async def upload_worker(app):
-    print("🚀 Upload Worker Started", flush=True)
-    while True:
-        job = await upload_queue.get()
-        job_id = job["job_id"]
-        folder = job["folder"]
-        bot = app.bot
-        user_id = job["user_id"]
+    print(f"Uploading {file_path} Size: {os.path.getsize(file_path)/1024/1024:.1f}MB", flush=True)
+    for attempt in range(3):
         try:
-            print(f"[{job_id}] ☁️ Starting Upload...", flush=True)
-            await bot.send_message(chat_id=user_id, text=f"[{job_id}] ☁️ Upload Started...")
-
-            full_path = os.path.join(folder, "full.mp4")
-            total_size_mb = os.path.getsize(full_path) / 1024 / 1024
-            duration = get_duration(full_path)
-
-            # 🖼️ THUMBNAIL - Frame At 10s
-            thumb_path = os.path.join(folder, "thumb.jpg")
-            await asyncio.to_thread(run_cmd, ["ffmpeg", "-y", "-ss", "10", "-i", full_path, "-vframes", "1", thumb_path])
-
-            # ✨ HIGHLIGHTS - First 5 Minutes
-            highlights_path = os.path.join(folder, "highlights.mp4")
-            await asyncio.to_thread(run_cmd, ["ffmpeg", "-y", "-ss", "0", "-i", full_path, "-t", "300", "-c", "copy", highlights_path])
-
-            # ✂️ SPLIT TO 500MB PARTS
-            if total_size_mb <= 500:
-                parts = [full_path]
-            else:
-                segment_time = int(duration * 500 / total_size_mb)
-                if segment_time < 60:
-                    segment_time = 60
-                print(f"[{job_id}] ✂️ Splitting To 500MB, Segment = {segment_time}s", flush=True)
-                await asyncio.to_thread(run_cmd, ["ffmpeg", "-y", "-i", full_path, "-c", "copy", "-map", "0", "-segment_time", str(segment_time), "-f", "segment", "-reset_timestamps", "1", os.path.join(folder, "part_%03d.mp4")])
-                os.remove(full_path)
-                parts = sorted([os.path.join(folder, f) for f in os.listdir(folder) if f.startswith("part_") and f.endswith(".mp4")])
-
-            # 📤 UPLOAD PARTS ONE BY ONE
-            part_links = []
-            for i, part in enumerate(parts):
-                link = await asyncio.to_thread(upload_mixdrop, part)
-                part_links.append(f"📦 Part {i+1}: {link}")
-                if os.path.exists(part):
-                    os.remove(part)
-
-            # 📤 UPLOAD HIGHLIGHTS
-            highlights_link = await asyncio.to_thread(upload_mixdrop, highlights_path)
-
-            # 📝 CAPTION
-            caption = (
-                "🎬 NEW LIVE RECORDING - FULL VIDEO\n\n"
-                f"{chr(10).join(part_links)}\n\n"
-                f"✨ Highlights (5 Min): {highlights_link}\n\n"
-                "#Live #Recorded"
-            )
-
-            # 📢 SEND TO CHANNEL
-            with open(thumb_path, "rb") as photo:
-                await bot.send_photo(chat_id=CHANNEL_ID, photo=photo, caption=caption)
-
-            await bot.send_message(chat_id=user_id, text=f"[{job_id}] ✅ Done! Sent To Channel.\n{chr(10).join(part_links)}")
-
+            with open(file_path, "rb") as f:
+                r = requests.post(
+                    "https://ul.mixdrop.ag/api",
+                    data={"email": MIXDROP_EMAIL, "key": MIXDROP_KEY},
+                    files={"file": f},
+                    timeout=1200
+                )
+            print(f"Mixdrop Response: {r.text[:800]}", flush=True)
+            data = r.json()
+            if data.get("success"):
+                fileref = data["result"]["fileref"]
+                url = f"https://mixdrop.ag/f/{fileref}"
+                print(f"Uploaded: {url}", flush=True)
+                return url
+            print(f"Mixdrop Failed: {data}", flush=True)
         except Exception as e:
-            print(f"[{job_id}] ❌ Upload Error: {e}", flush=True)
-            try:
-                await bot.send_message(chat_id=user_id, text=f"[{job_id}] ❌ Upload Error: {e}")
-            except:
-                pass
-        finally:
-            if os.path.exists(folder):
-                shutil.rmtree(folder, ignore_errors=True)
-            upload_queue.task_done()
+            print(f"Upload Error attempt {attempt+1}: {e}", flush=True)
+            time.sleep(5)
+    return None
 
-# ======================================================
-# 🔴 RECORD WORKER - MANY RECORDS AT SAME TIME
-# ======================================================
-async def record_job(url, user_id, job_id, app):
-    folder = f"job_{job_id}"
-    os.makedirs(folder, exist_ok=True)
-    try:
-        print(f"[{job_id}] 🔴 Recording Started: {url}", flush=True)
-        await app.bot.send_message(chat_id=user_id, text=f"[{job_id}] 🔴 Recording Started...")
+def get_video_url(url):
+    result = subprocess.run(
+        ["yt-dlp", "-g", "-f", "best[ext=mp4]/best", url],
+        capture_output=True, text=True, timeout=120
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().splitlines()[0]
+    result = subprocess.run(["yt-dlp", "-g", url], capture_output=True, text=True, timeout=120)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().splitlines()[0]
+    return None
 
-        success = await asyncio.to_thread(download_with_ytdlp, url, folder)
-        if not success:
-            await app.bot.send_message(chat_id=user_id, text=f"[{job_id}] ❌ Download Failed - All yt-dlp Methods Failed.")
-            shutil.rmtree(folder, ignore_errors=True)
-            return
-
-        downloaded_file = None
-        for f in os.listdir(folder):
-            if f.endswith((".mp4", ".mkv", ".webm", ".ts", ".mov")):
-                downloaded_file = os.path.join(folder, f)
-                break
-
-        if not downloaded_file:
-            await app.bot.send_message(chat_id=user_id, text=f"[{job_id}] ❌ Download Failed.")
-            shutil.rmtree(folder, ignore_errors=True)
-            return
-
-        full_path = os.path.join(folder, "full.mp4")
-        if downloaded_file != full_path:
-            os.rename(downloaded_file, full_path)
-
-        print(f"[{job_id}] ✅ Recording Done, Added To Upload Queue", flush=True)
-        await app.bot.send_message(chat_id=user_id, text=f"[{job_id}] ✅ Record Done! Added To Upload Queue.")
-        
-        await upload_queue.put({"job_id": job_id, "folder": folder, "user_id": user_id})
-
-    except Exception as e:
-        print(f"[{job_id}] ❌ Record Error: {e}", flush=True)
-        await app.bot.send_message(chat_id=user_id, text=f"[{job_id}] ❌ Record Error: {e}")
-        if os.path.exists(folder):
-            shutil.rmtree(folder, ignore_errors=True)
-
-# ======================================================
-# 🤖 TELEGRAM HANDLERS
-# ======================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ALLOWED_USERS:
-        await update.message.reply_text("⛔ Sorry, This Bot Is Private.")
-        return
-    await update.message.reply_text("👋 Hi! Send Links, I Will Record All At Same Time, Upload One By One To Mixdrop. 🎬")
+    await update.message.reply_text("Send a link to record")
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ALLOWED_USERS:
-        await update.message.reply_text("⛔ Sorry, This Bot Is Private.")
+        await update.message.reply_text("Not allowed")
         return
     url = update.message.text.strip()
     if "http" not in url:
         return
-    
-    job_id = str(uuid.uuid4())[:6]
-    asyncio.create_task(record_job(url, update.effective_user.id, job_id, context.application))
-    await update.message.reply_text(f"[{job_id}] ✅ Link Received! Recording Started. 🔴")
+    msg = await update.message.reply_text(f"Recording Started...\n{url}")
+    asyncio.create_task(process_stream(update, context, url, msg))
 
-async def post_init(app):
-    asyncio.create_task(upload_worker(app))
+async def process_stream(update, context, url, msg):
+    job_id = str(int(time.time()))[-6:]
+    folder = os.path.join(DOWNLOAD_DIR, job_id)
+    os.makedirs(folder, exist_ok=True)
+    links = []
+    thumb_path = os.path.join(folder, "thumb.jpg")
+    highlight_path = os.path.join(folder, "highlight.mp4")
+    ffmpeg_proc = None
+    uploaded_files = set()
+
+    try:
+        await msg.edit_text("Getting stream URL...")
+        stream_url = await asyncio.to_thread(get_video_url, url)
+        if not stream_url:
+            await msg.edit_text("Record Failed - No stream URL")
+            return
+
+        await msg.edit_text("Recording + Splitting + Uploading in parallel...")
+
+        part_pattern = os.path.join(folder, "part_%03d.mp4")
+
+        ffmpeg_cmd = [
+            "ffmpeg", "-i", stream_url,
+            "-c", "copy",
+            "-map", "0",
+            "-f", "segment",
+            "-segment_time", "3600",
+            "-segment_format", "mp4",
+            "-reset_timestamps", "1",
+            "-fs", str(MAX_BYTES),
+            part_pattern
+        ]
+
+        ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        async def watcher():
+            while True:
+                parts = sorted(glob.glob(os.path.join(folder, "part_*.mp4")))
+                active = ffmpeg_proc.poll() is None
+                ready = parts[:-1] if active else parts
+                for p in ready:
+                    if p in uploaded_files:
+                        continue
+                    s1 = os.path.getsize(p)
+                    await asyncio.sleep(2)
+                    if not os.path.exists(p):
+                        continue
+                    s2 = os.path.getsize(p)
+                    if s1 != s2:
+                        continue
+                    uploaded_files.add(p)
+                    await msg.edit_text(f"Uploading {os.path.basename(p)}... Total uploaded: {len(links)}")
+                    link = await asyncio.to_thread(upload_mixdrop, p)
+                    if link:
+                        links.append(link)
+                    if os.path.exists(p):
+                        os.remove(p)
+                if not active:
+                    break
+                await asyncio.sleep(5)
+            return
+
+        watcher_task = asyncio.create_task(watcher())
+
+        while ffmpeg_proc.poll() is None:
+            await asyncio.sleep(5)
+
+        await watcher_task
+
+        remaining = sorted(glob.glob(os.path.join(folder, "part_*.mp4")))
+        for p in remaining:
+            if p not in uploaded_files:
+                link = await asyncio.to_thread(upload_mixdrop, p)
+                if link:
+                    links.append(link)
+                if os.path.exists(p):
+                    os.remove(p)
+
+        if not links:
+            await msg.edit_text("Failed - No parts uploaded")
+            return
+
+        try:
+            subprocess.run(["ffmpeg", "-i", stream_url, "-ss", "10", "-vframes", "1", "-y", thumb_path], capture_output=True, timeout=60)
+        except Exception as e:
+            print(f"Thumb error: {e}", flush=True)
+
+        hl_link = None
+        try:
+            subprocess.run(["ffmpeg", "-i", stream_url, "-t", "300", "-c", "copy", "-y", highlight_path], capture_output=True, timeout=120)
+            if os.path.exists(highlight_path):
+                hl_link = await asyncio.to_thread(upload_mixdrop, highlight_path)
+                os.remove(highlight_path)
+        except Exception as e:
+            print(f"Highlight error: {e}", flush=True)
+
+        caption = f"NEW LIVE RECORDING\n\n{url}\n\n"
+        for i, l in enumerate(links, 1):
+            caption += f"Part {i}: {l}\n"
+        if hl_link:
+            caption += f"\nHighlights: {hl_link}\n"
+
+        if os.path.exists(thumb_path):
+            with open(thumb_path, "rb") as photo:
+                await context.bot.send_photo(CHANNEL_ID, photo=photo, caption=caption)
+            os.remove(thumb_path)
+        else:
+            await context.bot.send_message(CHANNEL_ID, caption)
+
+        await msg.edit_text(f"Done! {len(links)} parts uploaded")
+
+    except Exception as e:
+        print(f"Error: {e}", flush=True)
+        await msg.edit_text(f"Error: {e}")
+    finally:
+        if ffmpeg_proc and ffmpeg_proc.poll() is None:
+            ffmpeg_proc.kill()
+
+async def error_handler(update, context):
+    print(f"Error: {context.error}", flush=True)
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    print("🤖 Bot Is Running...")
-    app.run_polling()
+    app.add_error_handler(error_handler)
+    print("Bot Started", flush=True)
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
