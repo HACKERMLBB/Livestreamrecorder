@@ -7,6 +7,8 @@ import time
 import re
 import json
 import shutil
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -20,6 +22,26 @@ DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 MAX_BYTES = 400 * 1024 * 1024
+
+# ================= KEEP ALIVE FOR RENDER WEB SERVICE =================
+
+PORT = int(os.getenv("PORT", 10000))
+
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is Alive!")
+    def log_message(self, format, *args):
+        return
+
+def start_keep_alive():
+    try:
+        server = HTTPServer(("0.0.0.0", PORT), KeepAliveHandler)
+        print(f"KeepAlive Server Started on Port {PORT}", flush=True)
+        server.serve_forever()
+    except Exception as e:
+        print(f"KeepAlive Error: {e}", flush=True)
 
 # ================= MIXDROP UPLOAD =================
 
@@ -540,6 +562,7 @@ def run_bot():
         break
 
 def main():
+    threading.Thread(target=start_keep_alive, daemon=True).start()
     run_bot()
 
 if __name__ == "__main__":
