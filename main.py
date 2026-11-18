@@ -326,9 +326,55 @@ def get_video_url(url):
         print(f"⚠️ FFmpeg Probe Error: {e}", flush=True)
     return None
 
+# ================= TERMUX METHOD - YOUR WORKING METHOD =================
+# yt-dlp -f "bestvideo+bestaudio/best" -o "~/storage/dcim/MyLive/%(title)s.%(ext)s" "LINK"
+# Bot version - same command, but output to downloads folder
+
+def termux_method_download(url, folder):
+    try:
+        print(f"🔥 Trying TERMUX METHOD - bestvideo+bestaudio/best...", flush=True)
+        out_template = os.path.join(folder, "%(title)s.%(ext)s")
+        cmd = [
+            "yt-dlp",
+            "-c",
+            "-f", "bestvideo+bestaudio/best",
+            "-o", out_template,
+            "--no-check-certificates",
+            "--no-playlist",
+            "--live-from-start",
+            "--merge-output-format", "mp4",
+            "--concurrent-fragments", "5",
+            "--retries", "10",
+            "--fragment-retries", "10",
+            url
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=14400)
+        print(f"Termux Method Output: {result.stdout[-500:]} {result.stderr[-500:]}", flush=True)
+        files = sorted(glob.glob(os.path.join(folder, "*.*")))
+        files = [f for f in files if not f.endswith(".jpg") and not f.endswith(".part") and not f.endswith(".ytdl") and os.path.getsize(f) > 1000]
+        if files:
+            print(f"✅ Termux Method Success: {files[0]}", flush=True)
+            return files[0]
+    except Exception as e:
+        print(f"Termux Method Error: {e}", flush=True)
+    return None
+
 def direct_download_fallback(url, folder):
     try:
-        print(f"🔥 Trying Direct Download Fallback - yt-dlp...", flush=True)
+        print(f"🔥 Trying Direct Download - bestvideo+bestaudio/best...", flush=True)
+        out_template = os.path.join(folder, "%(title)s.%(ext)s")
+        cmd = ["yt-dlp", "-c", "-f", "bestvideo+bestaudio/best", "-o", out_template, "--no-check-certificates", "--no-playlist", "--merge-output-format", "mp4", url]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        print(f"yt-dlp Download Output: {result.stdout[-500:]} {result.stderr[-500:]}", flush=True)
+        files = sorted(glob.glob(os.path.join(folder, "*.*")))
+        files = [f for f in files if not f.endswith(".jpg") and os.path.getsize(f) > 1000]
+        if files:
+            print(f"✅ Direct Download Success: {files[0]}", flush=True)
+            return files[0]
+    except Exception as e:
+        print(f"Direct Download bestvideo+bestaudio Error: {e}", flush=True)
+    try:
+        print(f"🔥 Trying Direct Download Fallback - yt-dlp best...", flush=True)
         out_template = os.path.join(folder, "%(title)s.%(ext)s")
         cmd = ["yt-dlp", "-o", out_template, "-f", "best[ext=mp4]/best", "--no-check-certificates", "--no-playlist", url]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
@@ -393,6 +439,33 @@ async def process_stream(update, context, url, msg):
     ffmpeg_proc = None
     uploaded_files = set()
     try:
+        # ===== METHOD 0 - TERMUX METHOD FIRST (YOUR WORKING METHOD) =====
+        await msg.edit_text("🔥 Termux Method Trying Baby... 💖\n\n🎬 yt-dlp bestvideo+bestaudio/best\n⏳ Live එක ඉවර වෙනකම් Download වෙනවා...\nPlease Wait...")
+        termux_file = await asyncio.to_thread(termux_method_download, url, folder)
+        if termux_file and os.path.exists(termux_file):
+            await msg.edit_text("✅ Termux Method Success Baby! 💖\n\n✂️ 400MB වලට Split කරලා Upload කරනවා... ✨")
+            to_upload = [termux_file]
+            if os.path.getsize(termux_file) > MAX_BYTES:
+                to_upload = split_large_file(termux_file)
+                os.remove(termux_file)
+            for f in to_upload:
+                link = await asyncio.to_thread(upload_mixdrop, f)
+                if link:
+                    links.append(link)
+                if os.path.exists(f):
+                    os.remove(f)
+            if links:
+                caption = f"🎬✨ NEW RECORDING ✨🎬\n\n🔗 {url}\n\n📦 Total Parts: {len(links)}\n━━━━━━━━━━━━━━━\n\n"
+                for i, l in enumerate(links, 1):
+                    caption += f"▶️ Part {i}: {l}\n"
+                caption += f"\n💖 Enjoy Baby! ✨"
+                await context.bot.send_message(CHANNEL_ID, caption)
+                await msg.edit_text(f"🎉 Done Baby! 💖✨\n\n✅ Termux Method Uploaded! {len(links)} Parts")
+                return
+            # Termux download succeeded but upload failed, continue to old methods
+            await msg.edit_text("⚠️ Upload Failed, Trying Old Methods Baby... ✨")
+
+        # ===== OLD METHODS - IF TERMUX METHOD FAILS =====
         await msg.edit_text("🔍 Getting Stream URL Baby... ✨\n\n🔥 Trying YT-DLP + Streamlink + FFmpeg + M3U8 Methods...\n⏳ Please Wait...")
         stream_url = await asyncio.to_thread(get_video_url, url)
         if not stream_url:
