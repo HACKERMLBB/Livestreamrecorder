@@ -8,6 +8,7 @@ import re
 import json
 import shutil
 import threading
+import gc
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
@@ -43,7 +44,7 @@ def start_keep_alive():
     except Exception as e:
         print(f"KeepAlive Error: {e}", flush=True)
 
-# ================= MIXDROP UPLOAD =================
+# ================= MIXDROP UPLOAD - LOW RAM =================
 
 def upload_mixdrop(file_path):
     size_mb = os.path.getsize(file_path) / 1024 / 1024
@@ -66,6 +67,7 @@ def upload_mixdrop(file_path):
                 fileref = data["result"]["fileref"]
                 url = f"https://mixdrop.ag/f/{fileref}"
                 print(f"✅ Uploaded: {url}", flush=True)
+                gc.collect()
                 return url
             print(f"❌ Mixdrop Failed: {data}", flush=True)
             if r.status_code == 400:
@@ -73,24 +75,41 @@ def upload_mixdrop(file_path):
                 break
         except Exception as e:
             print(f"⚠️ Upload Error attempt {attempt+1}: {e}", flush=True)
+            gc.collect()
             time.sleep(5)
+    gc.collect()
     return None
 
+# ✨ LOW RAM SPLIT - 8MB Chunks Only, Never Load Full 400MB To RAM
 def split_large_file(file_path, chunk_mb=400):
     parts = []
     chunk_size = chunk_mb * 1024 * 1024
+    buffer_size = 8 * 1024 * 1024
     base = file_path.replace(".mp4", "")
     with open(file_path, "rb") as f:
         idx = 1
         while True:
-            data = f.read(chunk_size)
-            if not data:
-                break
             out = f"{base}_split{idx:03d}.mp4"
+            written = 0
             with open(out, "wb") as o:
-                o.write(data)
+                while written < chunk_size:
+                    to_read = min(buffer_size, chunk_size - written)
+                    data = f.read(to_read)
+                    if not data:
+                        break
+                    o.write(data)
+                    written += len(data)
+            if written == 0:
+                if os.path.exists(out):
+                    os.remove(out)
+                break
             parts.append(out)
+            print(f"✂️ Split Part {idx} Done: {written / 1024 / 1024:.1f}MB", flush=True)
             idx += 1
+            gc.collect()
+            if written < chunk_size:
+                break
+    gc.collect()
     return parts
 
 # ================= M3U8 FINDER =================
@@ -241,7 +260,7 @@ def get_video_url(url):
         ["yt-dlp", "-g", "-f", "best", "--extractor-args", "generic:impersonate"] + base_opts + [url],
         ["yt-dlp", "-g", "-f", "best[ext=mp4]/best", "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "--add-header", "Referer:https://www.google.com/"] + base_opts + [url],
         ["yt-dlp", "-g", "-f", "best", "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"] + base_opts + [url],
-        ["yt-dlp", "-g", "-f", "best", "--concurrent-fragments", "5"] + base_opts + [url],
+        ["yt-dlp", "-g", "-f", "best", "--concurrent-fragments", "2"] + base_opts + [url],
         ["yt-dlp", "-g", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best", "--no-playlist"] + base_opts + [url],
         ["yt-dlp", "-g", url],
         ["yt-dlp", "-g", "-f", "best", url],
@@ -260,7 +279,7 @@ def get_video_url(url):
         ["yt-dlp", "-g", "-f", "best", "--extractor-args", "youtube:player_client=android"] + base_opts + [url],
         ["yt-dlp", "-g", "-f", "best", "--extractor-args", "youtube:player_client=ios"] + base_opts + [url],
         ["yt-dlp", "-g", "-f", "best", "--live-from-start", "--extractor-args", "youtube:player_client=tv"] + base_opts + [url],
-        ["yt-dlp", "-g", "-f", "best", "--fragment-retries", "infinite", "--concurrent-fragments", "5", "--retry-sleep", "5"] + base_opts + [url],
+        ["yt-dlp", "-g", "-f", "best", "--fragment-retries", "infinite", "--concurrent-fragments", "2", "--retry-sleep", "5"] + base_opts + [url],
         ["yt-dlp", "-g", "-f", "best", "--cookies", "cookies.txt"] + base_opts + [url],
         ["yt-dlp", "-g", "-f", "best", "--geo-bypass", "--geo-bypass-country", "US"] + base_opts + [url],
         ["yt-dlp", "-g", "-f", "best", "--force-ipv4"] + base_opts + [url],
@@ -326,9 +345,39 @@ def get_video_url(url):
         print(f"⚠️ FFmpeg Probe Error: {e}", flush=True)
     return None
 
-# ================= TERMUX METHOD - YOUR WORKING METHOD =================
-# yt-dlp -f "bestvideo+bestaudio/best" -o "~/storage/dcim/MyLive/%(title)s.%(ext)s" "LINK"
-# Bot version - same command, but output to downloads folder
+# ================= AUTO WAIT FOR LIVE =================
+# ✨ Checks Every 2 Minutes If Live Is Started
+# ✨ If Live Is Not Started, It Keeps Waiting Forever - No Time Limit
+# ✨ When Live Starts, It Returns True And Recording Begins
+
+def check_is_live_quick(url):
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "-g", "-f", "best", "--no-playlist", "--no-check-certificates", "--no-warnings", url],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0 and result.stdout.strip().startswith("http"):
+            return True
+        result2 = subprocess.run(
+            ["yt-dlp", "-j", "--no-playlist", "--no-check-certificates", "--no-warnings", url],
+            capture_output=True, text=True, timeout=60
+        )
+        if result2.returncode == 0 and result2.stdout.strip():
+            try:
+                data = json.loads(result2.stdout.strip().splitlines()[0])
+                if data.get("is_live") is True:
+                    return True
+                if data.get("live_status") in ["is_live", "is_upcoming"]:
+                    if data.get("live_status") == "is_live":
+                        return True
+            except:
+                pass
+        return False
+    except Exception as e:
+        print(f"⚠️ Live Check Error: {e}", flush=True)
+        return False
+
+# ================= TERMUX METHOD - LOW RAM =================
 
 def termux_method_download(url, folder):
     try:
@@ -343,13 +392,16 @@ def termux_method_download(url, folder):
             "--no-playlist",
             "--live-from-start",
             "--merge-output-format", "mp4",
-            "--concurrent-fragments", "5",
+            "--concurrent-fragments", "2",
+            "--buffer-size", "16K",
+            "--http-chunk-size", "5M",
             "--retries", "10",
             "--fragment-retries", "10",
             url
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=14400)
         print(f"Termux Method Output: {result.stdout[-500:]} {result.stderr[-500:]}", flush=True)
+        gc.collect()
         files = sorted(glob.glob(os.path.join(folder, "*.*")))
         files = [f for f in files if not f.endswith(".jpg") and not f.endswith(".part") and not f.endswith(".ytdl") and os.path.getsize(f) > 1000]
         if files:
@@ -357,15 +409,17 @@ def termux_method_download(url, folder):
             return files[0]
     except Exception as e:
         print(f"Termux Method Error: {e}", flush=True)
+    gc.collect()
     return None
 
 def direct_download_fallback(url, folder):
     try:
         print(f"🔥 Trying Direct Download - bestvideo+bestaudio/best...", flush=True)
         out_template = os.path.join(folder, "%(title)s.%(ext)s")
-        cmd = ["yt-dlp", "-c", "-f", "bestvideo+bestaudio/best", "-o", out_template, "--no-check-certificates", "--no-playlist", "--merge-output-format", "mp4", url]
+        cmd = ["yt-dlp", "-c", "-f", "bestvideo+bestaudio/best", "-o", out_template, "--no-check-certificates", "--no-playlist", "--merge-output-format", "mp4", "--concurrent-fragments", "2", "--buffer-size", "16K", url]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
         print(f"yt-dlp Download Output: {result.stdout[-500:]} {result.stderr[-500:]}", flush=True)
+        gc.collect()
         files = sorted(glob.glob(os.path.join(folder, "*.*")))
         files = [f for f in files if not f.endswith(".jpg") and os.path.getsize(f) > 1000]
         if files:
@@ -376,7 +430,7 @@ def direct_download_fallback(url, folder):
     try:
         print(f"🔥 Trying Direct Download Fallback - yt-dlp best...", flush=True)
         out_template = os.path.join(folder, "%(title)s.%(ext)s")
-        cmd = ["yt-dlp", "-o", out_template, "-f", "best[ext=mp4]/best", "--no-check-certificates", "--no-playlist", url]
+        cmd = ["yt-dlp", "-o", out_template, "-f", "best[ext=mp4]/best", "--no-check-certificates", "--no-playlist", "--concurrent-fragments", "2", url]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
         files = sorted(glob.glob(os.path.join(folder, "*.*")))
         files = [f for f in files if not f.endswith(".jpg")]
@@ -398,11 +452,12 @@ def direct_download_fallback(url, folder):
         m3u8 = get_m3u8_then_ffmpeg(url)
         if m3u8:
             out_file = os.path.join(folder, "ffmpeg_live.mp4")
-            result = subprocess.run(["ffmpeg", "-i", m3u8, "-c", "copy", "-t", "3600", "-y", out_file], capture_output=True, text=True, timeout=3600)
+            result = subprocess.run(["ffmpeg", "-threads", "1", "-i", m3u8, "-c", "copy", "-t", "3600", "-y", out_file], capture_output=True, text=True, timeout=3600)
             if os.path.exists(out_file) and os.path.getsize(out_file) > 0:
                 return out_file
     except Exception as e:
         print(f"Direct Download FFmpeg Error: {e}", flush=True)
+    gc.collect()
     return None
 
 # ================= BOT COMMANDS =================
@@ -414,7 +469,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📥 I Will Record + Upload To Mixdrop\n"
         "📺 And Send All Parts To Your Channel ✨\n\n"
         "🔥 YT-DLP + Streamlink + FFmpeg + M3U8 Methods Active!\n"
-        "✂️ 400MB Split Active!"
+        "✂️ 400MB Split Active!\n"
+        "💾 512MB RAM Optimized!\n"
+        "⏳ Auto Wait For Live Active! Just Send Link Early, I Will Wait & Auto Record 🔴"
     )
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -424,7 +481,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     if "http" not in url:
         return
-    msg = await update.message.reply_text(f"🎬 Recording Started Baby... 💖\n\n🔗 {url}\n\n⏳ Please Wait...")
+    msg = await update.message.reply_text(f"🎬 Link Received Baby... 💖\n\n🔗 {url}\n\n⏳ Checking Live Status...")
     asyncio.create_task(process_stream(update, context, url, msg))
 
 # ================= MAIN RECORD PROCESS =================
@@ -439,11 +496,34 @@ async def process_stream(update, context, url, msg):
     ffmpeg_proc = None
     uploaded_files = set()
     try:
-        # ===== METHOD 0 - TERMUX METHOD FIRST (YOUR WORKING METHOD) =====
-        await msg.edit_text("🔥 Termux Method Trying Baby... 💖\n\n🎬 yt-dlp bestvideo+bestaudio/best\n⏳ Live එක ඉවර වෙනකම් Download වෙනවා...\nPlease Wait...")
+        # ===== AUTO WAIT FOR LIVE - NO TIME LIMIT =====
+        wait_count = 0
+        is_live_now = await asyncio.to_thread(check_is_live_quick, url)
+        while not is_live_now:
+            wait_count += 1
+            try:
+                await msg.edit_text(
+                    f"⏳ Waiting For Live Baby... 💖\n\n"
+                    f"🔗 {url}\n\n"
+                    f"🔴 Live Not Started Yet...\n"
+                    f"🔄 Checked: {wait_count} Times\n"
+                    f"⏰ Next Check In 2 Minutes...\n\n"
+                    f"✨ Don't Worry, I Will Auto Start When Live Begins!"
+                )
+            except:
+                pass
+            print(f"⏳ Waiting For Live... Check {wait_count} - Not Live Yet", flush=True)
+            gc.collect()
+            await asyncio.sleep(120)
+            is_live_now = await asyncio.to_thread(check_is_live_quick, url)
+
+        await msg.edit_text("🔴 Live Started Baby! 💖\n\n🎬 Starting Recording... ✨")
+
+        # ===== METHOD 0 - TERMUX METHOD FIRST =====
+        await msg.edit_text("🔥 Termux Method Trying Baby... 💖\n\n🎬 yt-dlp bestvideo+bestaudio/best\n⏳ Downloading Until Live Ends...\nPlease Wait...")
         termux_file = await asyncio.to_thread(termux_method_download, url, folder)
         if termux_file and os.path.exists(termux_file):
-            await msg.edit_text("✅ Termux Method Success Baby! 💖\n\n✂️ 400MB වලට Split කරලා Upload කරනවා... ✨")
+            await msg.edit_text("✅ Termux Method Success Baby! 💖\n\n✂️ Splitting To 400MB & Uploading... ✨")
             to_upload = [termux_file]
             if os.path.getsize(termux_file) > MAX_BYTES:
                 to_upload = split_large_file(termux_file)
@@ -454,6 +534,7 @@ async def process_stream(update, context, url, msg):
                     links.append(link)
                 if os.path.exists(f):
                     os.remove(f)
+                gc.collect()
             if links:
                 caption = f"🎬✨ NEW RECORDING ✨🎬\n\n🔗 {url}\n\n📦 Total Parts: {len(links)}\n━━━━━━━━━━━━━━━\n\n"
                 for i, l in enumerate(links, 1):
@@ -462,7 +543,6 @@ async def process_stream(update, context, url, msg):
                 await context.bot.send_message(CHANNEL_ID, caption)
                 await msg.edit_text(f"🎉 Done Baby! 💖✨\n\n✅ Termux Method Uploaded! {len(links)} Parts")
                 return
-            # Termux download succeeded but upload failed, continue to old methods
             await msg.edit_text("⚠️ Upload Failed, Trying Old Methods Baby... ✨")
 
         # ===== OLD METHODS - IF TERMUX METHOD FAILS =====
@@ -483,6 +563,7 @@ async def process_stream(update, context, url, msg):
                         links.append(link)
                     if os.path.exists(f):
                         os.remove(f)
+                    gc.collect()
                 if links:
                     caption = f"🎬✨ NEW RECORDING ✨🎬\n\n🔗 {url}\n\n📦 Total Parts: {len(links)}\n━━━━━━━━━━━━━━━\n\n"
                     for i, l in enumerate(links, 1):
@@ -497,6 +578,7 @@ async def process_stream(update, context, url, msg):
         part_pattern = os.path.join(folder, "part_%03d.mp4")
         ffmpeg_cmd = [
             "ffmpeg",
+            "-threads", "1",
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
@@ -546,8 +628,10 @@ async def process_stream(update, context, url, msg):
                                         links.append(l2)
                                     if os.path.exists(sp):
                                         os.remove(sp)
+                                    gc.collect()
                         if os.path.exists(up):
                             os.remove(up)
+                        gc.collect()
                 if not active:
                     break
                 await asyncio.sleep(5)
@@ -569,17 +653,18 @@ async def process_stream(update, context, url, msg):
                         links.append(link)
                     if os.path.exists(up):
                         os.remove(up)
+                    gc.collect()
         if not links:
             await msg.edit_text("❌ Failed Baby 🥺\n\nNo Parts Uploaded!")
             return
         await msg.edit_text("🖼️ Making Thumbnail + Highlights Baby... ✨")
         try:
-            subprocess.run(["ffmpeg", "-i", stream_url, "-ss", "10", "-vframes", "1", "-y", thumb_path], capture_output=True, timeout=60)
+            subprocess.run(["ffmpeg", "-threads", "1", "-i", stream_url, "-ss", "10", "-vframes", "1", "-y", thumb_path], capture_output=True, timeout=60)
         except Exception as e:
             print(f"Thumb error: {e}", flush=True)
         hl_link = None
         try:
-            subprocess.run(["ffmpeg", "-i", stream_url, "-t", "300", "-c", "copy", "-y", highlight_path], capture_output=True, timeout=120)
+            subprocess.run(["ffmpeg", "-threads", "1", "-i", stream_url, "-t", "300", "-c", "copy", "-y", highlight_path], capture_output=True, timeout=120)
             if os.path.exists(highlight_path):
                 if os.path.getsize(highlight_path) > MAX_BYTES:
                     hl_parts = split_large_file(highlight_path)
@@ -594,6 +679,7 @@ async def process_stream(update, context, url, msg):
                     os.remove(highlight_path)
         except Exception as e:
             print(f"Highlight error: {e}", flush=True)
+        gc.collect()
         caption = f"🎬✨ NEW LIVE RECORDING ✨🎬\n\n🔗 {url}\n\n📦 Total Parts: {len(links)} (400MB Each)\n━━━━━━━━━━━━━━━\n\n"
         for i, l in enumerate(links, 1):
             caption += f"▶️ Part {i}: {l}\n"
@@ -611,6 +697,7 @@ async def process_stream(update, context, url, msg):
         print(f"Error: {e}", flush=True)
         await msg.edit_text(f"❌ Error Baby 🥺\n\n{e}")
     finally:
+        gc.collect()
         if ffmpeg_proc and ffmpeg_proc.poll() is None:
             ffmpeg_proc.kill()
 
