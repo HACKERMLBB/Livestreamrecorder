@@ -55,7 +55,10 @@ def split_video(input_file):
     return final
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    msg = update.message
+    if not msg:
+        return
+    await msg.reply_text(
         "👋 Welcome! 🤖✨\n\n"
         "📥 Send Any Video Link!\n\n"
         "🔍 Find m3u8\n"
@@ -66,12 +69,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
+    msg = update.message or update.channel_post
+    if not msg or not msg.text:
+        return
+    url = msg.text.strip()
     if not url.startswith('http'):
-        await update.message.reply_text("❌ Please send a valid link!")
         return
 
-    status = await update.message.reply_text("🔍 Finding Stream... ⏳")
+    status = await msg.reply_text("🔍 Finding Stream... ⏳")
     os.makedirs('downloads', exist_ok=True)
 
     ydl_opts = {
@@ -148,13 +153,16 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text(f"✅ All Done! 🎉\n\n🎬 {title}\n📦 {total} Parts Posted to MixDrop + Telegram!")
 
     except Exception as e:
-        await status.edit_text(f"❌ Error: {str(e)[:400]}")
+        try:
+            await status.edit_text(f"❌ Error: {str(e)[:400]}")
+        except:
+            pass
 
 def main():
     threading.Thread(target=run_web, daemon=True).start()
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.CHANNEL_POST, handle_link))
     print(f"Bot Started on Port {PORT}...")
     app.run_polling()
 
