@@ -18,7 +18,18 @@ TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 MIXDROP_API_KEY = os.getenv('MIXDROP_API_KEY')
 MIXDROP_EMAIL = os.getenv('MIXDROP_EMAIL')
+OWNER_ID = int(os.getenv('OWNER_ID', '0'))
 PORT = 10000
+
+# ==============================
+# 👇 YOUR LINKS HERE - EDIT THIS
+# ==============================
+LINKS = [
+    "https://www.cam4.com/gelai20",
+    "https://bongacams.com/bellacutie69",
+    "https://www.cam4.com/sexy_gale",
+]
+# ==============================
 
 WATCH_FILE = "watchlist.json"
 recording_tasks = {}
@@ -41,14 +52,28 @@ def ping():
 def run_web():
     app_web.run(host="0.0.0.0", port=PORT)
 
-def load_watchlist():
-    if not os.path.exists(WATCH_FILE):
-        return []
+def is_owner(update: Update):
     try:
-        with open(WATCH_FILE, 'r') as f:
-            return json.load(f)
+        return update.effective_user and update.effective_user.id == OWNER_ID
     except:
-        return []
+        return False
+
+def load_watchlist():
+    data = []
+    seen = set()
+    if os.path.exists(WATCH_FILE):
+        try:
+            with open(WATCH_FILE, 'r') as f:
+                data = json.load(f)
+                for item in data:
+                    seen.add(item['url'])
+        except:
+            data = []
+    for url in LINKS:
+        if url and url not in seen and "example.com" not in url:
+            data.append({'url': url, 'title': 'Live'})
+            seen.add(url)
+    return data
 
 def save_watchlist(data):
     with open(WATCH_FILE, 'w') as f:
@@ -98,7 +123,7 @@ async def upload_part(bot, title, part_file, part_num):
             await bot.send_video(
                 chat_id=CHANNEL_ID,
                 video=vid,
-                caption=f"🎬 {title}\n\n📦 Part {part_num} ✨\n💾 45MB | 🔴 LIVE RECORD\n\n❤️ Enjoy! 🍿"
+                caption=f"🎬 {title}\n\n📦 Part {part_num} ✨\n💾 50MB | 🔴 LIVE RECORD\n\n❤️ Enjoy! 🍿"
             )
     except Exception as e:
         print(f"Telegram Upload Failed: {e}")
@@ -109,16 +134,31 @@ async def upload_part(bot, title, part_file, part_num):
             pass
     return link
 
+async def upload_part_with_cleanup(bot, title, part_file, part_num, mix_links):
+    try:
+        link = await upload_part(bot, title, part_file, part_num)
+        if link:
+            mix_links.append((part_num, link))
+    except Exception as e:
+        print(f"Upload Task Failed Part {part_num}: {e}")
+    finally:
+        try:
+            if os.path.exists(part_file):
+                os.remove(part_file)
+        except:
+            pass
+
 async def record_live(url, title):
     part_num = 0
     mix_links = []
     fail_count = 0
+    upload_tasks = []
     os.makedirs('downloads', exist_ok=True)
     print(f"🔴 Recording Started: {title}")
 
     if bot_app:
         try:
-            await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Auto Recording Started... 🚀\n📦 45MB Parts Coming Soon! 🍿\n⚡ Auto Reconnect: 3 Sec 🔄")
+            await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Auto Recording Started... 🚀\n📦 50MB Parts Coming Soon! 🍿\n⚡ Auto Reconnect: 3 Sec 🔄")
         except:
             pass
 
@@ -144,7 +184,7 @@ async def record_live(url, title):
             '-reconnect_streamed', '1',
             '-reconnect_delay_max', '3',
             '-i', m3u8,
-            '-fs', '45M',
+            '-fs', '50M',
             '-c', 'copy',
             '-bsf:a', 'aac_adtstoasc',
             part_file
@@ -166,23 +206,21 @@ async def record_live(url, title):
             await asyncio.sleep(3)
             continue
 
-        link = await upload_part(bot_app.bot, title, part_file, part_num)
-        if link:
-            mix_links.append(link)
+        task = asyncio.create_task(upload_part_with_cleanup(bot_app.bot, title, part_file, part_num, mix_links))
+        upload_tasks.append(task)
 
-        try:
-            os.remove(part_file)
-        except:
-            pass
+        await asyncio.sleep(1)
 
-        await asyncio.sleep(3)
+    if upload_tasks:
+        await asyncio.gather(*upload_tasks, return_exceptions=True)
 
     if bot_app:
-        text = f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n📦 Total Parts: {part_num} 📁\n💾 45MB Each\n\n"
+        text = f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n📦 Total Parts: {part_num} 📁\n💾 50MB Each\n\n"
         if mix_links:
+            mix_links_sorted = sorted(mix_links, key=lambda x: x[0])
             text += "🔗 MixDrop Links: 📥\n\n"
-            for i, link in enumerate(mix_links, 1):
-                text += f"▶️ Part {i}: {link}\n"
+            for part_no, link in mix_links_sorted:
+                text += f"▶️ Part {part_no}: {link}\n"
         text += "\n✨ Recording Complete! 🎉\n❤️ Thanks for Watching! 🍿"
         try:
             await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=text)
@@ -213,28 +251,13 @@ async def monitor_loop():
         await asyncio.sleep(10)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg:
-        return
-    await msg.reply_text(
-        "👋 Welcome! 🤖✨\n\n"
-        "🎬 Cartoon Live Auto Record Bot! 🍿\n\n"
-        "📋 Commands:\n"
-        "➕ /add <link> - Add Site 📌\n"
-        "📃 /list - List Sites 👀\n"
-        "➖ /remove <link> - Remove Site 🗑️\n"
-        "📺 /live - Check Live 🔴\n\n"
-        "🔴 Live Started = Auto Record! ⏺️\n"
-        "📦 45MB Parts = MixDrop + Channel! ☁️📢\n"
-        "⚡ Broken? 3 Sec Auto Reconnect! 🔄\n"
-        "🏁 Live End = Auto Stop! ✅\n\n"
-        "🚀 Ready! Send /add to Start! ✨"
-    )
+    return
 
 async def add_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        return
     msg = update.message
     if not msg or not context.args:
-        await msg.reply_text("❌ Usage: /add <link> 📌\n\nEx: /add https://example.com/live 🔗")
         return
     url = context.args[0].strip()
     watchlist = load_watchlist()
@@ -245,13 +268,15 @@ async def add_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title, _ = get_title(url)
     watchlist.append({'url': url, 'title': title})
     save_watchlist(watchlist)
-    await msg.reply_text(f"✅ Added Successfully! 🎉\n\n🎬 {title}\n🔗 {url}\n\n🔴 Live Started = Auto Record! ⏺️✨")
+    await msg.reply_text(f"✅ Added! 🎉\n\n🎬 {title}\n🔗 {url}")
 
 async def list_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        return
     msg = update.message
     watchlist = load_watchlist()
     if not watchlist:
-        await msg.reply_text("📭 No Sites Added Yet! 😅\n\n➕ /add <link> to Add! 📌")
+        await msg.reply_text("📭 No Sites Added! 😅")
         return
     text = "📋 Watchlist: 👀✨\n\n"
     for i, item in enumerate(watchlist, 1):
@@ -260,9 +285,10 @@ async def list_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(text)
 
 async def remove_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        return
     msg = update.message
     if not msg or not context.args:
-        await msg.reply_text("❌ Usage: /remove <link> 🗑️")
         return
     url = context.args[0].strip()
     watchlist = load_watchlist()
@@ -274,6 +300,8 @@ async def remove_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(f"✅ Removed! 🗑️\n🔗 {url}")
 
 async def live_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        return
     msg = update.message
     watchlist = load_watchlist()
     if not watchlist:
@@ -289,6 +317,9 @@ async def live_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"⚪ OFFLINE - 🎬 {item.get('title','Live')}\n"
     await msg.reply_text(text)
 
+async def ignore_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return
+
 def main():
     global bot_app
     threading.Thread(target=run_web, daemon=True).start()
@@ -299,6 +330,7 @@ def main():
     app.add_handler(CommandHandler("list", list_sites))
     app.add_handler(CommandHandler("remove", remove_site))
     app.add_handler(CommandHandler("live", live_now))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ignore_all))
     print(f"🤖 Bot Started on Port {PORT}... ✨")
     loop = asyncio.get_event_loop()
     loop.create_task(monitor_loop())
@@ -306,4 +338,4 @@ def main():
 
 if __name__ == "__main__":
     asyncio.set_event_loop(asyncio.new_event_loop())
-    main()
+    main() 
