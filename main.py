@@ -1,328 +1,163 @@
-import subprocess
-import requests
 import os
-import time
-import glob
-import json
-import threading
 import asyncio
-import shutil
+import threading
+import glob
+import requests
+import subprocess
+from flask import Flask
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+import yt_dlp
 
-# ================= CONFIG =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-MIXDROP_KEY = os.getenv("MIXDROP_KEY")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+TOKEN = os.getenv('BOT_TOKEN')
+CHANNEL_ID = os.getenv('CHANNEL_ID')
+MIXDROP_API_KEY = os.getenv('MIXDROP_API_KEY')
+MIXDROP_EMAIL = os.getenv('MIXDROP_EMAIL')
+PORT = int(os.environ.get("PORT", 10000))
 
-if not BOT_TOKEN:
-    print("ERROR: BOT_TOKEN is missing in Railway Variables!")
-# ==========================================
+app_web = Flask(__name__)
 
-USERNAMES_FILE = "usernames.json"
-MAX_TELEGRAM_SIZE = 50 * 1024 * 1024
+@app_web.route('/')
+def home():
+    return "Bot is Alive!"
 
-# ================= PLATFORMS - ONLY 3 =================
-PLATFORMS = {
-    "twitch": "https://twitch.tv/{id}",
-    "kick": "https://kick.com/{id}",
-    # Nimo: Streamlink එකට www ඕන, Browser එකට m ඕන - දෙකම Try කරනවා
-    "nimo": "https://www.nimo.tv/{id}",
-}
-
-def parse_entry(entry):
-    entry = entry.lower().replace("@", "").strip()
-    if ":" in entry:
-        platform, uid = entry.split(":", 1)
-        platform = platform.strip()
-        uid = uid.strip()
-        if platform not in PLATFORMS:
-            platform = "twitch"
-    else:
-        platform = "twitch"
-        uid = entry
-    return platform, uid
-
-def make_entry(platform, uid):
-    return f"{platform}:{uid}"
-
-def get_url(entry):
-    platform, uid = parse_entry(entry)
-    return PLATFORMS[platform].format(id=uid)
-
-def get_all_urls(entry):
-    # Nimo එකට URL 2ක් Return කරනවා, අනිත් ඒවට 1යි
-    platform, uid = parse_entry(entry)
-    if platform == "nimo":
-        return [
-            f"https://www.nimo.tv/{uid}",
-            f"https://www.nimo.tv/live/{uid}",
-            f"https://m.nimo.tv/live/{uid}",
-        ]
-    return [get_url(entry)]
-
-def display_name(entry):
-    platform, uid = parse_entry(entry)
-    return f"@{uid} [{platform}]"
-
-if os.path.exists(USERNAMES_FILE):
-    try:
-        USERNAMES = json.load(open(USERNAMES_FILE))
-        migrated = []
-        for u in USERNAMES:
-            if ":" not in str(u):
-                migrated.append(make_entry("twitch", str(u)))
-            else:
-                migrated.append(str(u).lower())
-        USERNAMES = migrated
-    except:
-        USERNAMES = []
-else:
-    USERNAMES = []
-
-RECORDING = set()
-
-def save_usernames():
-    with open(USERNAMES_FILE, "w") as f:
-        json.dump(USERNAMES, f)
-
-# ================= BOT COMMANDS =================
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = (
-        "🎬 Welcome to Yoon Auto Recorder 🎬\n\n"
-        "📌 Commands:\n"
-        "/add username - ➕ Add Twitch account\n"
-        "/add kick:username - ➕ Add Kick\n"
-        "/add nimo:RoomID - ➕ Add Nimo (Room ID only!)\n"
-        "/remove username - ➖ Remove an account\n"
-        "/list - 📋 Show all accounts\n"
-        "/status - 🔴 Check recording status\n\n"
-        "🎞️ Quality: 360p\n"
-        "✂️ Split: 50MB Parts\n"
-        "☁️ Upload: Mixdrop + Telegram\n\n"
-        "🌐 Platforms: ONLY 3\n"
-        "twitch, kick, nimo\n\n"
-        "💡 Examples:\n"
-        "/add yoon_gaming1\n"
-        "/add kick:yoon_live\n"
-        "/add nimo:818540864"
-    )
-    await update.message.reply_text(message)
-
-async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Usage: /add username OR /add kick:username OR /add nimo:RoomID\n💡 Example: /add nimo:818540864")
-        return
-    raw = " ".join(context.args).lower().strip()
-    platform, uid = parse_entry(raw)
-    entry = make_entry(platform, uid)
-    if entry not in USERNAMES:
-        USERNAMES.append(entry)
-        save_usernames()
-        await update.message.reply_text(
-            f"✅ Added: {display_name(entry)}\n"
-            f"🔴 Auto Record is now ON - 360p\n"
-            f"📁 File will be uploaded after live ends."
-        )
-    else:
-        await update.message.reply_text(f"ℹ️ {display_name(entry)} is already added.")
-
-async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Usage: /remove username OR /remove kick:username OR /remove nimo:RoomID\n💡 Example: /remove nimo:818540864")
-        return
-    raw = " ".join(context.args).lower().strip()
-    platform, uid = parse_entry(raw)
-    entry = make_entry(platform, uid)
-    if entry in USERNAMES:
-        USERNAMES.remove(entry)
-        save_usernames()
-        if entry in RECORDING:
-            RECORDING.discard(entry)
-        await update.message.reply_text(
-            f"🗑️ Removed: {display_name(entry)}\n"
-            f"⛔ Auto Record is now OFF for this account."
-        )
-    else:
-        await update.message.reply_text(f"❌ Not Found: {display_name(entry)}\n📋 Use /list to see all accounts.")
-
-async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not USERNAMES:
-        await update.message.reply_text("📭 No accounts added yet.\n➕ Use /add username to add one.")
-        return
-    text = "👀 Watching Accounts:\n\n"
-    for user in USERNAMES:
-        status = "🔴 REC" if user in RECORDING else "⏳ Waiting"
-        text += f"{display_name(user)} - {status}\n"
-    text += "\n🎞️ Quality: 360p\n✂️ Split: 50MB"
-    await update.message.reply_text(text)
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not RECORDING:
-        await update.message.reply_text("😴 No one is live right now.")
-        return
-    text = "🔴 Currently Recording:\n\n"
-    for user in RECORDING:
-        text += f"🎥 Live: {display_name(user)} - 360p\n"
-    await update.message.reply_text(text)
-
-# ================= HELPERS =================
+def run_web():
+    app_web.run(host="0.0.0.0", port=PORT)
 
 def upload_to_mixdrop(file_path):
     try:
-        with open(file_path, "rb") as f:
-            response = requests.post(
-                "https://ul.mixdrop.ag/api",
-                data={"key": MIXDROP_KEY},
-                files={"file": f},
-                timeout=3600
-            ).json()
-        if response.get("success"):
-            return response["result"]["url"]
+        url = "https://api.mixdrop.ag/upload"
+        with open(file_path, 'rb') as f:
+            files = {'file': (os.path.basename(file_path), f)}
+            data = {'email': MIXDROP_EMAIL, 'key': MIXDROP_API_KEY}
+            r = requests.post(url, files=files, data=data, timeout=600)
+            res = r.json()
+            if res.get('success'):
+                return f"https://mixdrop.ag/f/{res['result']['fileref']}"
+            return None
     except Exception as e:
-        print(f"Mixdrop Error: {e}")
-    return None
+        print(f"Upload Failed: {e}")
+        return None
 
-def is_live(entry):
-    # Nimo එකට URL 3ක්ම Try කරනවා
-    for url in get_all_urls(entry):
-        result = subprocess.run(
-            ["streamlink", url, "--json"],
-            capture_output=True, text=True
-        )
-        # Streamlink එකේ JSON එකේ streams තියෙනවද බලනවා
-        if result.returncode == 0 and "No playable streams" not in result.stdout and "streams" in result.stdout and '"streams": {}' not in result.stdout:
-            print(f"is_live TRUE via streamlink: {url}")
-            return True
-        # yt-dlp එකෙනුත් Try කරනවා
-        result2 = subprocess.run(
-            ["yt-dlp", url, "--skip-download", "--quiet"],
-            capture_output=True
-        )
-        if result2.returncode == 0:
-            print(f"is_live TRUE via yt-dlp: {url}")
-            return True
-    print(f"is_live FALSE: {entry}")
-    return False
+def split_video(input_file):
+    file_size = os.path.getsize(input_file)
+    chunk = 48 * 1024 * 1024
+    if file_size <= chunk:
+        return [input_file]
+    base = os.path.splitext(input_file)[0]
+    subprocess.run(['split', '-b', '48m', input_file, f'{base}_split_'], check=True)
+    split_files = sorted(glob.glob(f'{base}_split_*'))
+    final = []
+    for idx, sf in enumerate(split_files):
+        new_name = f"{base}_part{idx+1}.mp4"
+        os.rename(sf, new_name)
+        final.append(new_name)
+    return final
 
-def record_stream(entry, output_path):
-    # Nimo එකට URL 3ක්ම, අනිත් ඒවට URL 1යි - හැම URL එකටම 360p -> 360p30 Try කරනවා
-    for url in get_all_urls(entry):
-        print(f"Trying Streamlink 360p for {entry} via {url}...")
-        subprocess.run(["streamlink", url, "360p", "-o", output_path])
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            return True
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        print(f"Trying Streamlink 360p30 for {entry} via {url}...")
-        subprocess.run(["streamlink", url, "360p30", "-o", output_path])
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            return True
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        print(f"Trying yt-dlp for {entry} via {url}...")
-        subprocess.run(["yt-dlp", url, "-f", "best[height<=360]", "-o", output_path, "--no-part"])
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            return True
-        if os.path.exists(output_path):
-            os.remove(output_path)
-    return False
-
-async def upload_and_send(entry, base_name, full_path, app):
-    file_size_mb = os.path.getsize(full_path) / (1024 * 1024)
-    await app.bot.send_message(
-        CHANNEL_ID,
-        f"🏁 Live Ended: {display_name(entry)}\n"
-        f"📦 File Size: {file_size_mb:.1f} MB (360p)\n"
-        f"✂️ Splitting into 50MB parts...\n"
-        f"🔄 Next Live can record now - Upload is in background."
-    )
-    subprocess.run([
-        "ffmpeg", "-y", "-i", full_path,
-        "-fs", str(MAX_TELEGRAM_SIZE),
-        "-c", "copy",
-        f"{base_name}_part%03d.mp4"
-    ])
-    parts = sorted(glob.glob(f"{base_name}_part*.mp4"))
-    total_parts = len(parts)
-    for index, part_path in enumerate(parts, 1):
-        await app.bot.send_message(CHANNEL_ID, f"☁️ Uploading Part {index}/{total_parts} to Mixdrop... {display_name(entry)}")
-        mixdrop_link = upload_to_mixdrop(part_path)
-        if not mixdrop_link:
-            mixdrop_link = "Upload Failed"
-            await app.bot.send_message(CHANNEL_ID, f"❌ Mixdrop Upload Failed - Part {index}/{total_parts}: {display_name(entry)}")
-        else:
-            await app.bot.send_message(
-                CHANNEL_ID,
-                f"✅ Mixdrop Done - Part {index}/{total_parts}\n"
-                f"{display_name(entry)}\n"
-                f"🔗 Full Part Link: {mixdrop_link}"
-            )
-        caption = (
-            f"🎬 Live Replay: {display_name(entry)} [360p]\n"
-            f"📂 Part {index}/{total_parts}\n"
-            f"🔗 Mixdrop Part {index}: {mixdrop_link}\n"
-            f"▶️ Part {index} - Watch Here"
-        )
-        with open(part_path, "rb") as video:
-            await app.bot.send_video(
-                CHANNEL_ID,
-                video=video,
-                caption=caption,
-                supports_streaming=True
-            )
-        os.remove(part_path)
-        await asyncio.sleep(2)
-    if os.path.exists(full_path):
-        os.remove(full_path)
-    await app.bot.send_message(
-        CHANNEL_ID,
-        f"🎉 Completed: {display_name(entry)}\n"
-        f"📂 Total Parts: {total_parts} x 50MB\n"
-        f"🎞️ Quality: 360p\n"
-        f"✅ Enjoy!"
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Welcome! 🤖✨\n\n"
+        "📥 Send Any Video Link!\n\n"
+        "🔍 Find m3u8\n"
+        "✂️ Split 48MB\n"
+        "☁️ Upload MixDrop\n"
+        "📢 Post All Parts to Channel\n\n"
+        "🚀 Send a link!"
     )
 
-async def process_stream(entry, app):
-    platform, uid = parse_entry(entry)
-    base_name = f"{platform}_{uid}_{int(time.time())}"
-    full_path = f"{base_name}_full.mp4"
-    await app.bot.send_message(CHANNEL_ID, f"🔴 LIVE Detected!\n{display_name(entry)}\n🎥 Recording Started... [360p]")
-    success = record_stream(entry, full_path)
-    if not success:
-        await app.bot.send_message(CHANNEL_ID, f"❌ Recording Failed: {display_name(entry)}")
-        RECORDING.discard(entry)
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+    if not url.startswith('http'):
+        await update.message.reply_text("❌ Please send a valid link!")
         return
-    RECORDING.discard(entry)
-    await upload_and_send(entry, base_name, full_path, app)
 
-def check_loop(app):
-    while True:
-        for username in list(USERNAMES):
-            if username not in RECORDING and is_live(username):
-                RECORDING.add(username)
-                def run_task(user=username):
-                    asyncio.run(process_stream(user, app))
-                    RECORDING.discard(user)
-                threading.Thread(target=run_task, daemon=True).start()
-        time.sleep(60)
+    status = await update.message.reply_text("🔍 Finding Stream... ⏳")
+    os.makedirs('downloads', exist_ok=True)
+
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'format': 'best[height<=720]/best',
+        'outtmpl': 'downloads/%(title)s.%(ext)s',
+        'writethumbnail': True,
+        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'mweb']}}
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            title = info.get('title', 'Video')
+            files = glob.glob('downloads/*')
+            video_file = max(files, key=os.path.getctime) if files else ""
+            thumbs = glob.glob('downloads/*.jpg') + glob.glob('downloads/*.webp') + glob.glob('downloads/*.png')
+            thumb = thumbs[0] if thumbs else None
+            print(f"m3u8 URL: {info.get('url', '')[:100]}")
+
+        await status.edit_text("✂️ Splitting into 48MB Parts... 📦")
+        parts = split_video(video_file)
+        total = len(parts)
+
+        await status.edit_text(f"☁️ Uploading {total} Parts... 🚀")
+
+        mix_links = []
+        for idx, part in enumerate(parts):
+            part_num = idx + 1
+
+            # 1. Upload to MixDrop
+            link = upload_to_mixdrop(part)
+            if link:
+                mix_links.append(link)
+
+            # 2. Send Part Video to Telegram Channel
+            with open(part, 'rb') as vid:
+                await context.bot.send_video(
+                    chat_id=CHANNEL_ID,
+                    video=vid,
+                    caption=f"🎬 {title}\n\n📦 Part {part_num}/{total}\n✨ Enjoy! ❤️"
+                )
+
+            await status.edit_text(f"✅ Part {part_num}/{total} Done! MixDrop + Telegram! 🎉")
+
+            try:
+                os.remove(part)
+            except:
+                pass
+
+        # 3. Send Thumbnail + All Links to Channel
+        caption = f"🎬 *{title}*\n\n"
+        caption += f"📦 Total Parts: {total}\n"
+        caption += f"📁 Size: 48MB Each\n\n"
+        caption += "🔗 *MixDrop Links:*\n"
+        for i, link in enumerate(mix_links, 1):
+            caption += f"▶️ Part {i}: {link}\n"
+        caption += "\n✨ Enjoy! ❤️"
+
+        if thumb and os.path.exists(thumb):
+            with open(thumb, 'rb') as photo:
+                await context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo, caption=caption, parse_mode="Markdown")
+        else:
+            await context.bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="Markdown")
+
+        for f in glob.glob('downloads/*'):
+            try:
+                os.remove(f)
+            except:
+                pass
+
+        await status.edit_text(f"✅ All Done! 🎉\n\n🎬 {title}\n📦 {total} Parts Posted to MixDrop + Telegram!")
+
+    except Exception as e:
+        await status.edit_text(f"❌ Error: {str(e)[:400]}")
 
 def main():
-    if not BOT_TOKEN:
-        print("BOT_TOKEN missing! Check Railway Variables")
-        return
-    from telegram.request import HTTPXRequest
-    request = HTTPXRequest(read_timeout=600, write_timeout=600, connect_timeout=60, pool_timeout=600)
-    app = Application.builder().token(BOT_TOKEN).request(request).build()
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("add", add_command))
-    app.add_handler(CommandHandler("remove", remove_command))
-    app.add_handler(CommandHandler("list", list_command))
-    app.add_handler(CommandHandler("status", status_command))
-    threading.Thread(target=check_loop, args=(app,), daemon=True).start()
-    print("Bot Running - 360p Mode... [Streamlink + yt-dlp]")
+    threading.Thread(target=run_web, daemon=True).start()
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    print(f"Bot Started on Port {PORT}...")
     app.run_polling()
 
 if __name__ == "__main__":
+    asyncio.set_event_loop(asyncio.new_event_loop())
     main()
