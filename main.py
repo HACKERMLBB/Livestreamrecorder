@@ -124,16 +124,15 @@ def upload_to_mixdrop(file_path):
         return None
 
 async def upload_part(bot, title, part_file, part_num, thumb_file):
-    link = upload_to_mixdrop(part_file)
-    print(f"📤 MixDrop Link Part {part_num}: {link}")
-
+    # 1. මුලින්ම VIDEO එක Channel එකට! ⚡
     try:
         with open(part_file, 'rb') as vid:
             await bot.send_video(
                 chat_id=CHANNEL_ID,
                 video=vid,
-                caption=f"🎬 {title}\n\n📦 Part {part_num} ✨\n💾 49MB | 🔴 LIVE RECORD\n\n❤️ Enjoy! 🍿"
+                caption=f"🎬 {title}\n\n📦 Part {part_num} ✨\n💾 45MB | 🔴 LIVE RECORD\n\n❤️ Enjoy! 🍿"
             )
+        print(f"✅ Video Sent Part {part_num}")
     except Exception as e:
         print(f"Telegram Upload Failed: {e}")
         try:
@@ -142,6 +141,10 @@ async def upload_part(bot, title, part_file, part_num, thumb_file):
         except:
             pass
 
+    # 2. ඊට පස්සේ MixDrop එකට Upload!
+    link = upload_to_mixdrop(part_file)
+    print(f"📤 MixDrop Link Part {part_num}: {link}")
+
     if link:
         try:
             if thumb_file and os.path.exists(thumb_file):
@@ -149,12 +152,12 @@ async def upload_part(bot, title, part_file, part_num, thumb_file):
                     await bot.send_photo(
                         chat_id=CHANNEL_ID,
                         photo=photo,
-                        caption=f"🖼️ Thumbnail - Part {part_num} ✨\n\n🎬 {title}\n\n🔗 MixDrop Link 📥\n▶️ {link}\n\n💾 49MB | 📦 Part {part_num}\n❤️ Enjoy! 🍿"
+                        caption=f"🖼️ Thumbnail - Part {part_num} ✨\n\n🎬 {title}\n\n🔗 MixDrop Link 📥\n▶️ {link}\n\n💾 45MB | 📦 Part {part_num}\n❤️ Enjoy! 🍿"
                     )
             else:
                 await bot.send_message(
                     chat_id=CHANNEL_ID,
-                    text=f"🔗 MixDrop Link - Part {part_num} 📥✨\n\n🎬 {title}\n\n▶️ {link}\n\n💾 49MB | 📦 Part {part_num}\n❤️ Enjoy! 🍿"
+                    text=f"🔗 MixDrop Link - Part {part_num} 📥✨\n\n🎬 {title}\n\n▶️ {link}\n\n💾 45MB | 📦 Part {part_num}\n❤️ Enjoy! 🍿"
                 )
         except Exception as e:
             print(f"MixDrop Link Send Failed: {e}")
@@ -206,10 +209,10 @@ async def record_live(url, title, thumb_url=None):
                     await bot_app.bot.send_photo(
                         chat_id=CHANNEL_ID,
                         photo=photo,
-                        caption=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Auto Recording Started... 🚀\n📦 49MB Parts Coming Soon! 🍿\n⚡ Auto Reconnect: 3 Sec 🔄"
+                        caption=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Auto Recording Started... 🚀\n📦 45MB Parts Coming Soon! 🍿\n⚡ Auto Reconnect: 3 Sec 🔄"
                     )
             else:
-                await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Auto Recording Started... 🚀\n📦 49MB Parts Coming Soon! 🍿\n⚡ Auto Reconnect: 3 Sec 🔄")
+                await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Auto Recording Started... 🚀\n📦 45MB Parts Coming Soon! 🍿\n⚡ Auto Reconnect: 3 Sec 🔄")
         except:
             pass
 
@@ -235,7 +238,7 @@ async def record_live(url, title, thumb_url=None):
             '-reconnect_streamed', '1',
             '-reconnect_delay_max', '3',
             '-i', m3u8,
-            '-fs', '49M',
+            '-fs', '45M',
             '-c', 'copy',
             '-bsf:a', 'aac_adtstoasc',
             part_file
@@ -272,7 +275,7 @@ async def record_live(url, title, thumb_url=None):
             pass
 
     if bot_app:
-        text = f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n📦 Total Parts: {part_num} 📁\n💾 49MB Each\n\n"
+        text = f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n📦 Total Parts: {part_num} 📁\n💾 45MB Each\n\n"
         if mix_links:
             mix_links_sorted = sorted(mix_links, key=lambda x: x[0])
             text += "🔗 MixDrop Links: 📥\n\n"
