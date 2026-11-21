@@ -2,6 +2,7 @@ import os
 import asyncio
 import threading
 import glob
+import json
 import requests
 import subprocess
 import logging
@@ -17,53 +18,63 @@ TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 MIXDROP_API_KEY = os.getenv('MIXDROP_API_KEY')
 MIXDROP_EMAIL = os.getenv('MIXDROP_EMAIL')
-PORT = int(os.environ.get("PORT", 10000))
+PORT = 10000
 
-# Flask Web Server - Render Web Service එකට ඕනේ මේක!
+WATCH_FILE = "watchlist.json"
+recording_tasks = {}
+bot_app = None
+
 app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "Bot is Alive! 🤖"
+    return "🤖 Bot is Alive! ✨"
 
 @app_web.route('/health')
 def health():
-    return "OK", 200
+    return "OK ✅", 200
 
 @app_web.route('/ping')
 def ping():
-    return "Pong! Bot Alive!", 200
+    return "Pong! 🏓 Bot Alive! ✨", 200
 
 def run_web():
     app_web.run(host="0.0.0.0", port=PORT)
 
+def load_watchlist():
+    if not os.path.exists(WATCH_FILE):
+        return []
+    try:
+        with open(WATCH_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_watchlist(data):
+    with open(WATCH_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
 def get_m3u8_link(url):
     try:
-        # yt-dlp -g "url" -> Get m3u8 Direct Link
         result = subprocess.run(
             ['yt-dlp', '-g', '--no-warnings', '-f', 'best[height<=720]/best', url],
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, timeout=30
         )
-        m3u8 = result.stdout.strip().split('\n')[0]
-        print(f"m3u8 Found: {m3u8[:120]}")
-        return m3u8
-    except Exception as e:
-        print(f"m3u8 Get Failed: {e}")
+        out = result.stdout.strip()
+        if not out:
+            return None
+        m3u8 = out.split('\n')[0]
+        return m3u8 if m3u8.startswith('http') else None
+    except:
         return None
 
 def get_title(url):
     try:
         with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True, 'noplaylist': True}) as ydl:
             info = ydl.extract_info(url, download=False)
-            return info.get('title', 'Video'), info.get('thumbnail', None)
+            return info.get('title', 'Live'), info.get('thumbnail', None)
     except:
-        return "Video", None
-
-def download_from_m3u8(m3u8_url, output_file):
-    cmd = ['ffmpeg', '-y', '-i', m3u8_url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', output_file]
-    print(f"Downloading from m3u8...")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-    return os.path.exists(output_file)
+        return "Live", None
 
 def upload_to_mixdrop(file_path):
     try:
@@ -80,20 +91,126 @@ def upload_to_mixdrop(file_path):
         print(f"Upload Failed: {e}")
         return None
 
-def split_video(input_file):
-    file_size = os.path.getsize(input_file)
-    chunk = 48 * 1024 * 1024
-    if file_size <= chunk:
-        return [input_file]
-    base = os.path.splitext(input_file)[0]
-    subprocess.run(['split', '-b', '48m', input_file, f'{base}_split_'], check=True)
-    split_files = sorted(glob.glob(f'{base}_split_*'))
-    final = []
-    for idx, sf in enumerate(split_files):
-        new_name = f"{base}_part{idx+1}.mp4"
-        os.rename(sf, new_name)
-        final.append(new_name)
-    return final
+async def upload_part(bot, title, part_file, part_num):
+    link = upload_to_mixdrop(part_file)
+    try:
+        with open(part_file, 'rb') as vid:
+            await bot.send_video(
+                chat_id=CHANNEL_ID,
+                video=vid,
+                caption=f"🎬 {title}\n\n📦 Part {part_num} ✨\n💾 45MB | 🔴 LIVE RECORD\n\n❤️ Enjoy! 🍿"
+            )
+    except Exception as e:
+        print(f"Telegram Upload Failed: {e}")
+        try:
+            with open(part_file, 'rb') as doc:
+                await bot.send_document(chat_id=CHANNEL_ID, document=doc, caption=f"🎬 {title} - 📦 Part {part_num} ✨")
+        except:
+            pass
+    return link
+
+async def record_live(url, title):
+    part_num = 0
+    mix_links = []
+    fail_count = 0
+    os.makedirs('downloads', exist_ok=True)
+    print(f"🔴 Recording Started: {title}")
+
+    if bot_app:
+        try:
+            await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Auto Recording Started... 🚀\n📦 45MB Parts Coming Soon! 🍿\n⚡ Auto Reconnect: 3 Sec 🔄")
+        except:
+            pass
+
+    while True:
+        m3u8 = get_m3u8_link(url)
+        if not m3u8:
+            fail_count += 1
+            print(f"⚠️ m3u8 Not Found! Retry {fail_count}/10 in 3 sec - {title}")
+            if fail_count >= 10:
+                print(f"🏁 Live Ended: {title}")
+                break
+            await asyncio.sleep(3)
+            continue
+
+        fail_count = 0
+        part_num += 1
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()[:30]
+        part_file = f"downloads/{safe_title}_part{part_num}.mp4"
+
+        cmd = [
+            'ffmpeg', '-y',
+            '-reconnect', '1',
+            '-reconnect_streamed', '1',
+            '-reconnect_delay_max', '3',
+            '-i', m3u8,
+            '-fs', '45M',
+            '-c', 'copy',
+            '-bsf:a', 'aac_adtstoasc',
+            part_file
+        ]
+        print(f"🎥 Recording Part {part_num}...")
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=7200)
+        except subprocess.TimeoutExpired:
+            print(f"⏰ Part {part_num} Timeout")
+
+        if not os.path.exists(part_file) or os.path.getsize(part_file) < 100000:
+            print(f"⚠️ Part {part_num} Empty! Retrying in 3 sec... 🔄")
+            if os.path.exists(part_file):
+                try:
+                    os.remove(part_file)
+                except:
+                    pass
+            part_num -= 1
+            await asyncio.sleep(3)
+            continue
+
+        link = await upload_part(bot_app.bot, title, part_file, part_num)
+        if link:
+            mix_links.append(link)
+
+        try:
+            os.remove(part_file)
+        except:
+            pass
+
+        await asyncio.sleep(3)
+
+    if bot_app:
+        text = f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n📦 Total Parts: {part_num} 📁\n💾 45MB Each\n\n"
+        if mix_links:
+            text += "🔗 MixDrop Links: 📥\n\n"
+            for i, link in enumerate(mix_links, 1):
+                text += f"▶️ Part {i}: {link}\n"
+        text += "\n✨ Recording Complete! 🎉\n❤️ Thanks for Watching! 🍿"
+        try:
+            await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=text)
+        except:
+            pass
+    print(f"✅ Recording Finished: {title} - {part_num} Parts")
+
+async def monitor_loop():
+    await asyncio.sleep(10)
+    while True:
+        try:
+            watchlist = load_watchlist()
+            for item in watchlist:
+                url = item['url']
+                title = item.get('title', 'Live')
+                if url in recording_tasks:
+                    continue
+                m3u8 = get_m3u8_link(url)
+                if m3u8:
+                    real_title, _ = get_title(url)
+                    if real_title and real_title != "Live":
+                        title = real_title
+                    task = asyncio.create_task(record_live(url, title))
+                    recording_tasks[url] = task
+                    task.add_done_callback(lambda t, u=url: recording_tasks.pop(u, None))
+        except Exception as e:
+            print(f"Monitor Error: {e}")
+        await asyncio.sleep(10)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -101,113 +218,90 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await msg.reply_text(
         "👋 Welcome! 🤖✨\n\n"
-        "📥 Send Any Live / Video Link!\n\n"
-        "🔍 Get m3u8 with yt-dlp -g\n"
-        "⬇️ Download from m3u8\n"
-        "✂️ Split 48MB\n"
-        "☁️ Upload MixDrop\n"
-        "📢 Post All Parts to Channel\n\n"
-        "🚀 Send a link!"
+        "🎬 Cartoon Live Auto Record Bot! 🍿\n\n"
+        "📋 Commands:\n"
+        "➕ /add <link> - Add Site 📌\n"
+        "📃 /list - List Sites 👀\n"
+        "➖ /remove <link> - Remove Site 🗑️\n"
+        "📺 /live - Check Live 🔴\n\n"
+        "🔴 Live Started = Auto Record! ⏺️\n"
+        "📦 45MB Parts = MixDrop + Channel! ☁️📢\n"
+        "⚡ Broken? 3 Sec Auto Reconnect! 🔄\n"
+        "🏁 Live End = Auto Stop! ✅\n\n"
+        "🚀 Ready! Send /add to Start! ✨"
     )
 
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message or update.channel_post
-    if not msg or not msg.text:
+async def add_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not context.args:
+        await msg.reply_text("❌ Usage: /add <link> 📌\n\nEx: /add https://example.com/live 🔗")
         return
-    url = msg.text.strip()
-    if not url.startswith('http'):
+    url = context.args[0].strip()
+    watchlist = load_watchlist()
+    for item in watchlist:
+        if item['url'] == url:
+            await msg.reply_text("⚠️ Already Added! 👀")
+            return
+    title, _ = get_title(url)
+    watchlist.append({'url': url, 'title': title})
+    save_watchlist(watchlist)
+    await msg.reply_text(f"✅ Added Successfully! 🎉\n\n🎬 {title}\n🔗 {url}\n\n🔴 Live Started = Auto Record! ⏺️✨")
+
+async def list_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    watchlist = load_watchlist()
+    if not watchlist:
+        await msg.reply_text("📭 No Sites Added Yet! 😅\n\n➕ /add <link> to Add! 📌")
         return
+    text = "📋 Watchlist: 👀✨\n\n"
+    for i, item in enumerate(watchlist, 1):
+        status = "🔴 RECORDING ⏺️" if item['url'] in recording_tasks else "⚪ Waiting... 💤"
+        text += f"{i}. 🎬 {item.get('title','Live')}\n{status}\n🔗 {item['url']}\n\n"
+    await msg.reply_text(text)
 
-    status = await msg.reply_text("🔍 Getting m3u8 Link... ⏳")
-    os.makedirs('downloads', exist_ok=True)
+async def remove_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not context.args:
+        await msg.reply_text("❌ Usage: /remove <link> 🗑️")
+        return
+    url = context.args[0].strip()
+    watchlist = load_watchlist()
+    new_list = [x for x in watchlist if x['url'] != url]
+    if len(new_list) == len(watchlist):
+        await msg.reply_text("❌ Not Found! 😅")
+        return
+    save_watchlist(new_list)
+    await msg.reply_text(f"✅ Removed! 🗑️\n🔗 {url}")
 
-    try:
-        m3u8_url = get_m3u8_link(url)
-        if not m3u8_url:
-            await status.edit_text("❌ m3u8 Not Found! Try Another Link!")
-            return
-
-        await status.edit_text(f"✅ m3u8 Found!\n🔗 {m3u8_url[:60]}...\n⬇️ Downloading from m3u8... 🚀")
-
-        title, thumb_url = get_title(url)
-        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()[:50]
-        video_file = f"downloads/{safe_title}.mp4"
-
-        success = download_from_m3u8(m3u8_url, video_file)
-        if not success:
-            await status.edit_text("❌ Download Failed from m3u8!")
-            return
-
-        thumb = None
-        if thumb_url:
-            try:
-                thumb = "downloads/thumb.jpg"
-                r = requests.get(thumb_url, timeout=20)
-                open(thumb, 'wb').write(r.content)
-            except:
-                thumb = None
-
-        await status.edit_text("✂️ Splitting into 48MB Parts... 📦")
-        parts = split_video(video_file)
-        total = len(parts)
-
-        await status.edit_text(f"☁️ Uploading {total} Parts... 🚀")
-        mix_links = []
-        for idx, part in enumerate(parts):
-            part_num = idx + 1
-            link = upload_to_mixdrop(part)
-            if link:
-                mix_links.append(link)
-
-            with open(part, 'rb') as vid:
-                await context.bot.send_video(
-                    chat_id=CHANNEL_ID,
-                    video=vid,
-                    caption=f"🎬 {title}\n\n📦 Part {part_num}/{total}\n✨ Enjoy! ❤️"
-                )
-
-            await status.edit_text(f"✅ Part {part_num}/{total} Done! MixDrop + Telegram! 🎉")
-            try:
-                os.remove(part)
-            except:
-                pass
-
-        caption = f"🎬 *{title}*\n\n"
-        caption += f"📦 Total Parts: {total}\n"
-        caption += f"📁 Size: 48MB Each\n\n"
-        caption += "🔗 *MixDrop Links:*\n"
-        for i, link in enumerate(mix_links, 1):
-            caption += f"▶️ Part {i}: {link}\n"
-        caption += "\n✨ Enjoy! ❤️"
-
-        if thumb and os.path.exists(thumb):
-            with open(thumb, 'rb') as photo:
-                await context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo, caption=caption, parse_mode="Markdown")
+async def live_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    watchlist = load_watchlist()
+    if not watchlist:
+        await msg.reply_text("📭 Watchlist Empty! 😅")
+        return
+    await msg.reply_text("🔍 Checking Live... ⏳✨")
+    text = "📺 Live Status: 👀\n\n"
+    for item in watchlist:
+        m3u8 = get_m3u8_link(item['url'])
+        if m3u8:
+            text += f"🔴 LIVE - 🎬 {item.get('title','Live')}\n"
         else:
-            await context.bot.send_message(chat_id=CHANNEL_ID, text=caption, parse_mode="Markdown")
-
-        for f in glob.glob('downloads/*'):
-            try:
-                os.remove(f)
-            except:
-                pass
-
-        await status.edit_text(f"✅ All Done! 🎉\n\n🎬 {title}\n📦 {total} Parts Posted!")
-
-    except Exception as e:
-        try:
-            await status.edit_text(f"❌ Error: {str(e)[:400]}")
-        except:
-            pass
+            text += f"⚪ OFFLINE - 🎬 {item.get('title','Live')}\n"
+    await msg.reply_text(text)
 
 def main():
-    # Flask Web Server එක වෙන Thread එකක Run කරනවා
+    global bot_app
     threading.Thread(target=run_web, daemon=True).start()
     app = ApplicationBuilder().token(TOKEN).build()
+    bot_app = app
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.CHANNEL_POST, handle_link))
-    print(f"Bot Started on Port {PORT}...")
-    logger.info("Bot Started - Polling...")
+    app.add_handler(CommandHandler("add", add_site))
+    app.add_handler(CommandHandler("list", list_sites))
+    app.add_handler(CommandHandler("remove", remove_site))
+    app.add_handler(CommandHandler("live", live_now))
+    print(f"🤖 Bot Started on Port {PORT}... ✨")
+    loop = asyncio.get_event_loop()
+    loop.create_task(monitor_loop())
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
