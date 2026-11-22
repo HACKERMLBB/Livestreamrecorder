@@ -1,6 +1,7 @@
 # ============================================================
 # 🌸✨ LiveStream Recorder - 30 Links ✨🌸
 # 💖 480p | 📦 15MB Parts | 🚀 Queue Upload | 🎥 No Stop Record
+# 🔥 FIXED: Python 3.14 Event Loop + Telegram Timeout
 # ============================================================
 
 import os
@@ -13,6 +14,7 @@ import logging
 from flask import Flask, jsonify
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.request import HTTPXRequest
 import yt_dlp
 
 logging.basicConfig(level=logging.INFO)
@@ -59,7 +61,6 @@ LINKS = [
 "https://www.cam4.com/NatashaSloane",
 "https://www.cam4.com/Malena_99",
 "https://www.cam4.com/ximena_ruiz18",
-
 ]
 # ============================================================
 
@@ -75,6 +76,21 @@ bot_app = None
 upload_stats = {"queued": 0, "done": 0}
 
 app_web = Flask(__name__)
+
+# ============================================================
+# 🛡️ SAFE SEND - Timeout Unaath Bot Crash Wenne Na! 💖
+# ============================================================
+async def safe_send(text):
+    if not bot_app:
+        return
+    for attempt in range(3):
+        try:
+            await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=text)
+            return
+        except Exception as e:
+            print(f"⚠️ Send Retry {attempt+1}/3: {e}")
+            await asyncio.sleep(2)
+    print("❌ Send Failed After 3 Retries, But Bot Still Alive!")
 
 # ============================================================
 # 🌐 WEB DASHBOARD
@@ -191,21 +207,19 @@ async def upload_worker(worker_id):
                         video=vid,
                         caption=f"🎬 {title}\n\n📦 Part {part_num} ✨\n💾 15MB | 🎥 480p | 🔴 LIVE RECORD\n\n❤️ Enjoy! 🍿"
                     )
-            except:
+            except Exception as e:
+                print(f"⚠️ Send Video Failed, Trying Document: {e}")
                 try:
                     with open(file_path, 'rb') as doc:
                         await bot_app.bot.send_document(chat_id=CHANNEL_ID, document=doc, caption=f"🎬 {title} - 📦 Part {part_num} ✨")
-                except:
-                    pass
+                except Exception as e2:
+                    print(f"❌ Send Document Also Failed: {e2}")
 
             upload_stats["done"] += 1
             print(f"✅ [Worker {worker_id}] Done: {title} Part {part_num} | Link: {link}")
 
-            if is_last and bot_app:
-                try:
-                    await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n✅ All Parts Uploaded! 💖\n❤️ Thanks for Watching! 🍿")
-                except:
-                    pass
+            if is_last:
+                await safe_send(f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n✅ All Parts Uploaded! 💖\n❤️ Thanks for Watching! 🍿")
 
         except Exception as e:
             print(f"❌ Worker Error: {e}")
@@ -227,11 +241,7 @@ async def record_live_light(url, title):
     os.makedirs('downloads', exist_ok=True)
     print(f"🔴 Start Recording: {title}")
 
-    if bot_app:
-        try:
-            await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Recording... 🚀\n📦 15MB Parts | 🎥 480p | ☁️ Queue Upload! 🍿")
-        except:
-            pass
+    await safe_send(f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Recording... 🚀\n📦 15MB Parts | 🎥 480p | ☁️ Queue Upload! 🍿")
 
     while True:
         m3u8_url = get_m3u8_link(url)
@@ -371,7 +381,7 @@ async def live_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 # ============================================================
-# 🚀 MAIN - Python 3.14 Event Loop FIX Included! 🔥
+# 🚀 MAIN - FIXED! 🔥
 # ============================================================
 async def post_init(app):
     for i in range(UPLOAD_WORKERS):
@@ -380,14 +390,24 @@ async def post_init(app):
 
 def main():
     global bot_app
-    # 🔥 FIX: No Current Event Loop Error - Python 3.14
+    # 🔥 FIX 1: No Current Event Loop Error - Python 3.14
     try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
     threading.Thread(target=run_web, daemon=True).start()
-    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+
+    # 🔥 FIX 2: Telegram Timeout - Longer Timeout! 60 Sec!
+    request = HTTPXRequest(
+        connection_pool_size=50,
+        connect_timeout=30.0,
+        read_timeout=60.0,
+        write_timeout=60.0,
+        pool_timeout=30.0,
+    )
+
+    app = ApplicationBuilder().token(TOKEN).request(request).post_init(post_init).build()
     bot_app = app
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_sites))
