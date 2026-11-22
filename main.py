@@ -1,7 +1,6 @@
 import os
 import asyncio
 import threading
-import glob
 import json
 import requests
 import subprocess
@@ -9,7 +8,7 @@ import logging
 import re
 from flask import Flask
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import yt_dlp
 
 logging.basicConfig(level=logging.INFO)
@@ -84,10 +83,9 @@ def save_watchlist(data):
         json.dump(data, f, indent=2)
 
 # =========================================================
-# 👇 NEW: yt-dlp -F + -g වලින් වැඩ කරන Quality + m3u8 හොයනවා!
+# 👇 yt-dlp -F + -g වලින් වැඩ කරන Quality + m3u8 හොයනවා!
 # =========================================================
 def list_formats(url):
-    # yt-dlp -F Output එක ගන්නවා
     try:
         result = subprocess.run(
             ['yt-dlp', '-F', '--no-warnings', '--no-playlist', url],
@@ -98,14 +96,9 @@ def list_formats(url):
         return ""
 
 def parse_formats(f_output):
-    # Example Lines:
-    # 1  mp4  428x240  ... video only
-    # 2  mp4  640x360  ... video only
-    # audio_aac_96  m4a  audio only ...
-    # 18 mp4  640x360 ... (combined)
-    videos = []  # (format_id, height, is_video_only)
-    audios = []  # (format_id,)
-    combined = []  # (format_id, height)
+    videos = []
+    audios = []
+    combined = []
     for line in f_output.split('\n'):
         line = line.strip()
         if not line or line.startswith('[') or line.startswith('ID') or line.startswith('---'):
@@ -114,15 +107,12 @@ def parse_formats(f_output):
         if len(parts) < 3:
             continue
         fid = parts[0]
-        # Format ID එක වලංගද බලනවා
         if not re.match(r'^[a-zA-Z0-9_\-\.]+$', fid):
             continue
         low = line.lower()
-        # Audio Only ද?
         if 'audio only' in low:
             audios.append(fid)
             continue
-        # Resolution එක හොයනවා: 640x360 වගේ
         m = re.search(r'(\d+)x(\d+)', line)
         if not m:
             continue
@@ -130,37 +120,31 @@ def parse_formats(f_output):
         if 'video only' in low:
             videos.append((fid, height))
         else:
-            # Video Only කියලා නැත්තම් Combined එකක්!
             combined.append((fid, height))
     return videos, audios, combined
 
 def pick_best_format(url):
-    # Returns: (format_string_for_-g, is_combined)
-    # Ex: "3+audio_aac_96" or "18" or "bestvideo[height<=720]+bestaudio"
     f_out = list_formats(url)
     if f_out:
         videos, audios, combined = parse_formats(f_out)
-        # 1. මුලින්ම Combined <=720p තියෙනවද බලනවා (ඒක තමයි ලේසිම!)
         combined_720 = [x for x in combined if x[1] <= 720]
         if combined_720:
             combined_720.sort(key=lambda x: x[1], reverse=True)
             best = combined_720[0]
             print(f"✅ Format Found via -F: Combined {best[0]} ({best[1]}p)")
             return best[0]
-        # 2. Combined නැත්තම් Video Only <=720p + Audio
         videos_720 = [x for x in videos if x[1] <= 720]
         if videos_720:
             videos_720.sort(key=lambda x: x[1], reverse=True)
             v_id = videos_720[0][0]
             v_h = videos_720[0][1]
             if audios:
-                a_id = audios[-1]  # අන්තිම Audio එක තමයි හොදම එක වෙන්නේ
+                a_id = audios[-1]
                 print(f"✅ Format Found via -F: Video {v_id} ({v_h}p) + Audio {a_id}")
                 return f"{v_id}+{a_id}"
             else:
                 print(f"✅ Format Found via -F: Video Only {v_id} ({v_h}p)")
                 return v_id
-        # 3. 720p ට වැඩි එකක් විතරක් තියෙනවනම් අඩුම එක ගන්නවා
         if videos:
             videos.sort(key=lambda x: x[1])
             v_id = videos[0][0]
@@ -170,12 +154,10 @@ def pick_best_format(url):
         if combined:
             combined.sort(key=lambda x: x[1])
             return combined[0][0]
-    # 4. -F Fail වුණොත් Old Fallback
     print(f"⚠️ -F Parse Failed, Using Fallback Format")
     return "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
 
 def get_streams(url):
-    # 👇 -F වලින් හොයාගත්ත Format එක -g වලින් m3u8 Link වලට හරවනවා!
     fmt = pick_best_format(url)
     try:
         result = subprocess.run(
@@ -380,6 +362,10 @@ async def monitor_loop():
             print(f"Monitor Error: {e}")
         await asyncio.sleep(10)
 
+async def on_startup(app):
+    # 👇 PTB 21.0 එකට: Bot Start වෙන ගමන් Monitor එක Start වෙනවා!
+    asyncio.create_task(monitor_loop())
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
@@ -467,11 +453,10 @@ def main():
     app.add_handler(CommandHandler("list", list_sites))
     app.add_handler(CommandHandler("remove", remove_site))
     app.add_handler(CommandHandler("live", live_now))
+    # 👇 PTB 21.0 Fix: post_init එකෙන් Monitor Start කරනවා
+    app.post_init = on_startup
     print(f"🤖 Bot Started on Port {PORT}... ✨")
-    loop = asyncio.get_event_loop()
-    loop.create_task(monitor_loop())
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.set_event_loop(asyncio.new_event_loop())
     main()
