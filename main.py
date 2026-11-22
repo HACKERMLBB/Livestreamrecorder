@@ -26,6 +26,10 @@ PORT = 10000
 LINKS = [ "https://www.cam4.com/gelai20",
     "https://bongacams.com/bellacutie69",
     "https://www.cam4.com/sexy_gale",
+         "https://chaturbate.com/veola_sexy",
+         "https://chaturbate.com/sweet_savii",
+         "https://chaturbate.com/your_lovely_kai",
+         "https://chaturbate.com/sweety_dianne28",
 ]
 # ==============================
 
