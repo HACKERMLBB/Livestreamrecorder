@@ -28,6 +28,7 @@ LINKS = [ "https://www.cam4.com/gelai20",
     "https://www.cam4.com/sexy_gale",
 "https://bongacams.com/sweetpink061",
 "https://bongacams.com/pinaysweetmommyxx",
+         "https://bongacams.com/pinaymaniac69",
 ]
 # ==============================
 
