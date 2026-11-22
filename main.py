@@ -1,7 +1,7 @@
 # ============================================================
 # 🌸✨ LiveStream Recorder - 30 Links ✨🌸
-# 💖 480p | 📦 15MB Parts | 🚀 Queue Upload | 🎥 No Stop Record
-# 🔥 FIXED: Python 3.14 Event Loop + Telegram Timeout
+# 💖 480p | 📦 15MB Parts | 🚀 Direct Upload - NO QUEUE!
+# 🔥 FIXED: Python 3.14 + Telegram Timeout + .ts -> Real .mp4
 # ============================================================
 
 import os
@@ -66,14 +66,11 @@ LINKS = [
 
 MAX_CONCURRENT = 30
 PART_SIZE = 15 * 1024 * 1024  # 📦 15MB
-UPLOAD_WORKERS = 3            # 👷 3 Upload Workers
 CHECK_BATCH = 5               # 👀 Check 5 By 5
-
-UPLOAD_QUEUE = asyncio.Queue()
 
 recording_tasks = {}
 bot_app = None
-upload_stats = {"queued": 0, "done": 0}
+upload_stats = {"done": 0}
 
 app_web = Flask(__name__)
 
@@ -93,11 +90,32 @@ async def safe_send(text):
     print("❌ Send Failed After 3 Retries, But Bot Still Alive!")
 
 # ============================================================
+# 🔥 FFmpeg: .ts -> Real .mp4 Convert!
+# ============================================================
+def convert_to_mp4(ts_path):
+    mp4_path = ts_path.replace(".ts", ".mp4")
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', ts_path, '-c', 'copy', '-movflags', '+faststart', mp4_path],
+            capture_output=True, text=True, timeout=120
+        )
+        if os.path.exists(mp4_path) and os.path.getsize(mp4_path) > 100000:
+            os.remove(ts_path)
+            print(f"✅ Converted to Real MP4: {mp4_path} | Size: {os.path.getsize(mp4_path)//1024}KB")
+            return mp4_path
+        else:
+            print(f"⚠️ FFmpeg Failed: {result.stderr[:500] if result.stderr else 'No Output'}")
+            return ts_path
+    except Exception as e:
+        print(f"⚠️ FFmpeg Error: {e}")
+        return ts_path
+
+# ============================================================
 # 🌐 WEB DASHBOARD
 # ============================================================
 @app_web.route('/')
 def home():
-    return f"🤖 Bot Alive! ✨<br>🎥 Recording: {len(recording_tasks)}/30<br>📦 Queue: {UPLOAD_QUEUE.qsize()}<br>✅ Uploaded: {upload_stats['done']}"
+    return f"🤖 Bot Alive! ✨<br>🎥 Recording: {len(recording_tasks)}/30<br>✅ Uploaded: {upload_stats['done']}"
 
 @app_web.route('/health')
 def health():
@@ -109,9 +127,9 @@ def api_list():
     out = [{'url': i['url'], 'title': i.get('title', 'Live'), 'recording': i['url'] in recording_tasks} for i in watchlist]
     return jsonify(out)
 
-@app_web.route('/api/queue')
-def api_queue():
-    return jsonify({"queued": UPLOAD_QUEUE.qsize(), "done": upload_stats["done"], "recording": len(recording_tasks)})
+@app_web.route('/api/status')
+def api_status():
+    return jsonify({"done": upload_stats["done"], "recording": len(recording_tasks)})
 
 def run_web():
     app_web.run(host="0.0.0.0", port=PORT, threaded=True)
@@ -141,7 +159,6 @@ def load_watchlist():
 # ============================================================
 def get_m3u8_link(url):
     try:
-        # 🎥 480p Only - Low RAM / Fast Upload 💖
         result = subprocess.run(
             ['yt-dlp', '-g', '--no-warnings', '-f', 'best[height<=480]/best', url],
             capture_output=True, text=True, timeout=30
@@ -179,59 +196,57 @@ def upload_to_mixdrop(file_path):
             res = r.json()
             if res.get('success'):
                 return f"https://mixdrop.ag/f/{res['result']['fileref']}"
+            print(f"❌ Mixdrop Failed: {res}")
             return None
     except Exception as e:
         print(f"❌ Upload Failed: {e}")
         return None
 
 # ============================================================
-# 👷 UPLOAD WORKER - Takes From Queue & Uploads!
+# 🚀 DIRECT UPLOAD - No Queue! Part Piruna Gaman Upload! 💖
 # ============================================================
-async def upload_worker(worker_id):
-    print(f"👷 Upload Worker {worker_id} Started! ✨")
-    while True:
-        item = await UPLOAD_QUEUE.get()
-        file_path = item['file']
-        title = item['title']
-        part_num = item['part']
-        is_last = item.get('is_last', False)
+async def upload_part_now(file_path, title, part_num, is_last=False):
+    print(f"📤 Direct Uploading: {title} Part {part_num}")
+    try:
+        link = await asyncio.to_thread(upload_to_mixdrop, file_path)
+        print(f"☁️ Mixdrop Link: {link}")
 
-        print(f"📤 [Worker {worker_id}] Uploading: {title} Part {part_num} | Queue Left: {UPLOAD_QUEUE.qsize()}")
-
+        sent = False
         try:
-            link = await asyncio.to_thread(upload_to_mixdrop, file_path)
-            try:
-                with open(file_path, 'rb') as vid:
-                    await bot_app.bot.send_video(
-                        chat_id=CHANNEL_ID,
-                        video=vid,
-                        caption=f"🎬 {title}\n\n📦 Part {part_num} ✨\n💾 15MB | 🎥 480p | 🔴 LIVE RECORD\n\n❤️ Enjoy! 🍿"
-                    )
-            except Exception as e:
-                print(f"⚠️ Send Video Failed, Trying Document: {e}")
-                try:
-                    with open(file_path, 'rb') as doc:
-                        await bot_app.bot.send_document(chat_id=CHANNEL_ID, document=doc, caption=f"🎬 {title} - 📦 Part {part_num} ✨")
-                except Exception as e2:
-                    print(f"❌ Send Document Also Failed: {e2}")
-
-            upload_stats["done"] += 1
-            print(f"✅ [Worker {worker_id}] Done: {title} Part {part_num} | Link: {link}")
-
-            if is_last:
-                await safe_send(f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n✅ All Parts Uploaded! 💖\n❤️ Thanks for Watching! 🍿")
-
+            with open(file_path, 'rb') as vid:
+                await bot_app.bot.send_video(
+                    chat_id=CHANNEL_ID,
+                    video=vid,
+                    caption=f"🎬 {title}\n\n📦 Part {part_num} ✨\n💾 15MB | 🎥 480p | 🔴 LIVE RECORD\n\n☁️ Mixdrop: {link}\n\n❤️ Enjoy! 🍿"
+                )
+            sent = True
+            print(f"✅ Video Sent: {title} Part {part_num}")
         except Exception as e:
-            print(f"❌ Worker Error: {e}")
-        finally:
+            print(f"⚠️ Send Video Failed, Trying Document: {e}")
             try:
-                os.remove(file_path)
-            except:
-                pass
-            UPLOAD_QUEUE.task_done()
+                with open(file_path, 'rb') as doc:
+                    await bot_app.bot.send_document(chat_id=CHANNEL_ID, document=doc, caption=f"🎬 {title} - 📦 Part {part_num} ✨\n\n☁️ Mixdrop: {link}")
+                sent = True
+                print(f"✅ Document Sent: {title} Part {part_num}")
+            except Exception as e2:
+                print(f"❌ Send Document Also Failed: {e2}")
+                await safe_send(f"🎬 {title} - 📦 Part {part_num} ✨\n\n☁️ Mixdrop Link: {link}\n\n⚠️ Telegram Video Failed, Use Mixdrop Link! 💖")
+
+        upload_stats["done"] += 1
+        print(f"✅ Done: {title} Part {part_num} | Link: {link} | Sent: {sent}")
+
+        if is_last:
+            await safe_send(f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n✅ All Parts Uploaded! 💖\n❤️ Thanks for Watching! 🍿")
+    except Exception as e:
+        print(f"❌ Upload Part Error: {e}")
+    finally:
+        try:
+            os.remove(file_path)
+        except:
+            pass
 
 # ============================================================
-# 🔴 RECORD - Never Stops! 15MB -> Queue -> Continue! 🚀
+# 🔴 RECORD - 15MB -> Convert -> Direct Upload -> Continue! 🚀
 # ============================================================
 async def record_live_light(url, title):
     part_num = 0
@@ -241,7 +256,7 @@ async def record_live_light(url, title):
     os.makedirs('downloads', exist_ok=True)
     print(f"🔴 Start Recording: {title}")
 
-    await safe_send(f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Recording... 🚀\n📦 15MB Parts | 🎥 480p | ☁️ Queue Upload! 🍿")
+    await safe_send(f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Recording... 🚀\n📦 15MB Parts | 🎥 480p | 🚀 Direct Upload! 🍿")
 
     while True:
         m3u8_url = get_m3u8_link(url)
@@ -273,20 +288,19 @@ async def record_live_light(url, title):
                 continue
             seen_segments.add(seg_url)
 
-            # 📦 15MB Reached? -> Push to Queue & Continue! No Stop! 🚀
+            # 📦 15MB Reached? -> Convert & Direct Upload!
             if part_num == 0 or not part_file or not os.path.exists(part_file) or os.path.getsize(part_file) >= PART_SIZE:
                 if part_num > 0 and part_file and os.path.exists(part_file):
-                    await UPLOAD_QUEUE.put({'file': part_file, 'title': title, 'part': part_num, 'is_last': False})
-                    upload_stats["queued"] += 1
-                    print(f"📦 Queued: {title} Part {part_num} | Queue: {UPLOAD_QUEUE.qsize()} | Continuing... 🚀")
+                    part_file = await asyncio.to_thread(convert_to_mp4, part_file)
+                    await upload_part_now(part_file, title, part_num, is_last=False)
+                    print(f"✅ Part {part_num} Uploaded! Continuing... 🚀")
 
                 part_num += 1
                 safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()[:30]
-                part_file = f"downloads/{safe_title}_part{part_num}.mp4"
+                part_file = f"downloads/{safe_title}_part{part_num}.ts"
                 print(f"🎥 Recording Part {part_num} - {title}")
 
             try:
-                # 💧 Stream Download - Low RAM!
                 seg = requests.get(seg_url, timeout=15, stream=True)
                 with open(part_file, 'ab') as f:
                     for chunk in seg.iter_content(chunk_size=8192):
@@ -300,11 +314,12 @@ async def record_live_light(url, title):
         if len(seen_segments) > 2000:
             seen_segments.clear()
 
-    # 📦 Last Part -> Queue!
+    # 📦 Last Part -> Convert & Direct Upload!
     if part_num > 0 and part_file and os.path.exists(part_file) and os.path.getsize(part_file) > 100000:
-        await UPLOAD_QUEUE.put({'file': part_file, 'title': title, 'part': part_num, 'is_last': True})
-        print(f"📦 Queued Last Part: {title} Part {part_num}")
-    print(f"✅ Record Finished (Upload Still In Queue): {title}")
+        part_file = await asyncio.to_thread(convert_to_mp4, part_file)
+        await upload_part_now(part_file, title, part_num, is_last=True)
+        print(f"📦 Uploaded Last Part: {title} Part {part_num}")
+    print(f"✅ Record Finished: {title}")
 
 # ============================================================
 # 👀 MONITOR - 30 Links = 5 By 5 Check! No CPU Spike! 💖
@@ -316,7 +331,6 @@ async def monitor_loop():
         try:
             if len(recording_tasks) < MAX_CONCURRENT:
                 watchlist = load_watchlist()
-                # 👇 30 At Once No, Only 5 At A Time!
                 batch = []
                 for _ in range(CHECK_BATCH):
                     if watchlist:
@@ -347,20 +361,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Welcome! 🤖✨\n\n"
         "🎬 30 Links Auto Record Bot! 🍿\n\n"
         "📦 15MB Parts | 🎥 480p\n"
-        "🚀 Queue Upload | 🎥 Record Never Stops!\n\n"
+        "🚀 Direct Upload - No Queue!\n\n"
         "📋 Commands:\n"
         "📃 /list - List Links 👀\n"
-        "📺 /live - Check Live 🔴\n"
-        "📦 /queue - Queue Status ☁️"
-    )
-
-async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"📦 Upload Queue Status: ☁️✨\n\n"
-        f"⏳ In Queue: {UPLOAD_QUEUE.qsize()}\n"
-        f"✅ Uploaded: {upload_stats['done']}\n"
-        f"🎥 Recording: {len(recording_tasks)}/30\n\n"
-        f"💡 Record Never Stops, Upload Happens Later! 🚀"
+        "📺 /live - Check Live 🔴"
     )
 
 async def list_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -384,13 +388,10 @@ async def live_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 🚀 MAIN - FIXED! 🔥
 # ============================================================
 async def post_init(app):
-    for i in range(UPLOAD_WORKERS):
-        asyncio.create_task(upload_worker(i + 1))
     asyncio.create_task(monitor_loop())
 
 def main():
     global bot_app
-    # 🔥 FIX 1: No Current Event Loop Error - Python 3.14
     try:
         asyncio.get_event_loop()
     except RuntimeError:
@@ -398,7 +399,6 @@ def main():
 
     threading.Thread(target=run_web, daemon=True).start()
 
-    # 🔥 FIX 2: Telegram Timeout - Longer Timeout! 60 Sec!
     request = HTTPXRequest(
         connection_pool_size=50,
         connect_timeout=30.0,
@@ -412,8 +412,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_sites))
     app.add_handler(CommandHandler("live", live_now))
-    app.add_handler(CommandHandler("queue", queue_status))
-    print(f"🤖 Bot Started! ✨ 15MB Queue Mode | 480p | 30 Links | Port {PORT} 🚀")
+    print(f"🤖 Bot Started! ✨ Direct Upload Mode | 480p | 30 Links | Port {PORT} 🚀")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
