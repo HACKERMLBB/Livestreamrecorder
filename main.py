@@ -65,8 +65,8 @@ LINKS = [
 
 MAX_CONCURRENT = 30
 PART_SIZE = 15 * 1024 * 1024  # 📦 15MB
-UPLOAD_WORKERS = 3            # 👷 30ට Workers 3යි! 2 මදි!
-CHECK_BATCH = 5               # 👀 එකපාර Check කරන්නේ 5යි!
+UPLOAD_WORKERS = 3            # 👷 3 Upload Workers
+CHECK_BATCH = 5               # 👀 Check 5 By 5
 
 UPLOAD_QUEUE = asyncio.Queue()
 
@@ -125,6 +125,7 @@ def load_watchlist():
 # ============================================================
 def get_m3u8_link(url):
     try:
+        # 🎥 480p Only - Low RAM / Fast Upload 💖
         result = subprocess.run(
             ['yt-dlp', '-g', '--no-warnings', '-f', 'best[height<=480]/best', url],
             capture_output=True, text=True, timeout=30
@@ -168,7 +169,7 @@ def upload_to_mixdrop(file_path):
         return None
 
 # ============================================================
-# 👷 UPLOAD WORKER
+# 👷 UPLOAD WORKER - Takes From Queue & Uploads!
 # ============================================================
 async def upload_worker(worker_id):
     print(f"👷 Upload Worker {worker_id} Started! ✨")
@@ -178,7 +179,9 @@ async def upload_worker(worker_id):
         title = item['title']
         part_num = item['part']
         is_last = item.get('is_last', False)
+
         print(f"📤 [Worker {worker_id}] Uploading: {title} Part {part_num} | Queue Left: {UPLOAD_QUEUE.qsize()}")
+
         try:
             link = await asyncio.to_thread(upload_to_mixdrop, file_path)
             try:
@@ -194,13 +197,16 @@ async def upload_worker(worker_id):
                         await bot_app.bot.send_document(chat_id=CHANNEL_ID, document=doc, caption=f"🎬 {title} - 📦 Part {part_num} ✨")
                 except:
                     pass
+
             upload_stats["done"] += 1
             print(f"✅ [Worker {worker_id}] Done: {title} Part {part_num} | Link: {link}")
+
             if is_last and bot_app:
                 try:
                     await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n✅ All Parts Uploaded! 💖\n❤️ Thanks for Watching! 🍿")
                 except:
                     pass
+
         except Exception as e:
             print(f"❌ Worker Error: {e}")
         finally:
@@ -220,11 +226,13 @@ async def record_live_light(url, title):
     seen_segments = set()
     os.makedirs('downloads', exist_ok=True)
     print(f"🔴 Start Recording: {title}")
+
     if bot_app:
         try:
             await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Recording... 🚀\n📦 15MB Parts | 🎥 480p | ☁️ Queue Upload! 🍿")
         except:
             pass
+
     while True:
         m3u8_url = get_m3u8_link(url)
         if not m3u8_url:
@@ -235,32 +243,40 @@ async def record_live_light(url, title):
             await asyncio.sleep(3)
             continue
         fail_count = 0
+
         try:
             r = requests.get(m3u8_url, timeout=10)
             playlist = r.text
         except:
             await asyncio.sleep(3)
             continue
+
         base = m3u8_url.rsplit('/', 1)[0]
         segments = []
         for line in playlist.splitlines():
             line = line.strip()
             if line and not line.startswith('#'):
                 segments.append(line if line.startswith('http') else base + '/' + line)
+
         for seg_url in segments:
             if seg_url in seen_segments:
                 continue
             seen_segments.add(seg_url)
+
+            # 📦 15MB Reached? -> Push to Queue & Continue! No Stop! 🚀
             if part_num == 0 or not part_file or not os.path.exists(part_file) or os.path.getsize(part_file) >= PART_SIZE:
                 if part_num > 0 and part_file and os.path.exists(part_file):
                     await UPLOAD_QUEUE.put({'file': part_file, 'title': title, 'part': part_num, 'is_last': False})
                     upload_stats["queued"] += 1
                     print(f"📦 Queued: {title} Part {part_num} | Queue: {UPLOAD_QUEUE.qsize()} | Continuing... 🚀")
+
                 part_num += 1
                 safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()[:30]
                 part_file = f"downloads/{safe_title}_part{part_num}.mp4"
                 print(f"🎥 Recording Part {part_num} - {title}")
+
             try:
+                # 💧 Stream Download - Low RAM!
                 seg = requests.get(seg_url, timeout=15, stream=True)
                 with open(part_file, 'ab') as f:
                     for chunk in seg.iter_content(chunk_size=8192):
@@ -269,9 +285,12 @@ async def record_live_light(url, title):
             except:
                 continue
             await asyncio.sleep(0.02)
+
         await asyncio.sleep(2)
         if len(seen_segments) > 2000:
             seen_segments.clear()
+
+    # 📦 Last Part -> Queue!
     if part_num > 0 and part_file and os.path.exists(part_file) and os.path.getsize(part_file) > 100000:
         await UPLOAD_QUEUE.put({'file': part_file, 'title': title, 'part': part_num, 'is_last': True})
         print(f"📦 Queued Last Part: {title} Part {part_num}")
@@ -287,7 +306,7 @@ async def monitor_loop():
         try:
             if len(recording_tasks) < MAX_CONCURRENT:
                 watchlist = load_watchlist()
-                # 👇 30ම එකපාර නෙවෙයි, 5ක් විතරයි Check කරන්නේ!
+                # 👇 30 At Once No, Only 5 At A Time!
                 batch = []
                 for _ in range(CHECK_BATCH):
                     if watchlist:
@@ -352,7 +371,7 @@ async def live_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 # ============================================================
-# 🚀 MAIN
+# 🚀 MAIN - Python 3.14 Event Loop FIX Included! 🔥
 # ============================================================
 async def post_init(app):
     for i in range(UPLOAD_WORKERS):
@@ -361,6 +380,12 @@ async def post_init(app):
 
 def main():
     global bot_app
+    # 🔥 FIX: No Current Event Loop Error - Python 3.14
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     threading.Thread(target=run_web, daemon=True).start()
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     bot_app = app
