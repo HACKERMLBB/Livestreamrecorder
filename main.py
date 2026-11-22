@@ -6,7 +6,8 @@ import requests
 import subprocess
 import logging
 import re
-from flask import Flask
+import datetime
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import yt_dlp
@@ -21,7 +22,7 @@ MIXDROP_EMAIL = os.getenv('MIXDROP_EMAIL')
 PORT = int(os.getenv('PORT', 10000))
 
 # ==============================
-# 👇 YOUR LINKS HERE - EDIT THIS
+# YOUR LINKS HERE - EDIT THIS
 # ==============================
 LINKS = [
     "https://www.cam4.com/gelai20",
@@ -41,25 +42,11 @@ LINKS = [
 # ==============================
 
 WATCH_FILE = "watchlist.json"
+VIDEOS_FILE = "videos.json"
 recording_tasks = {}
 bot_app = None
 
 app_web = Flask(__name__)
-
-@app_web.route('/')
-def home():
-    return "🤖 Bot is Alive! ✨"
-
-@app_web.route('/health')
-def health():
-    return "OK ✅", 200
-
-@app_web.route('/ping')
-def ping():
-    return "Pong! 🏓 Bot Alive! ✨", 200
-
-def run_web():
-    app_web.run(host="0.0.0.0", port=PORT)
 
 def load_watchlist():
     data = []
@@ -82,8 +69,166 @@ def save_watchlist(data):
     with open(WATCH_FILE, 'w') as f:
         json.dump(data, f, indent=2)
 
+def load_videos():
+    if os.path.exists(VIDEOS_FILE):
+        try:
+            with open(VIDEOS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_video(title, part_num, mix_link):
+    videos = load_videos()
+    videos.insert(0, {
+        'title': title,
+        'part': part_num,
+        'link': mix_link,
+        'time': datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    })
+    videos = videos[:100]
+    with open(VIDEOS_FILE, 'w') as f:
+        json.dump(videos, f, indent=2)
+
+# ==============================
+# WEBSITE - Cute Dashboard
+# ==============================
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Bot</title>
+<style>
+* { box-sizing: border-box; font-family: 'Segoe UI', sans-serif; }
+body { background: linear-gradient(180deg, #ffe3f3, #e0f7ff, #fff6d6); margin: 0; padding: 12px; min-height: 100vh; }
+.header { text-align: center; background: white; border-radius: 25px; padding: 20px 10px; box-shadow: 0 5px 20px rgba(255,150,200,0.3); margin-bottom: 12px; }
+.header h1 { margin: 0; font-size: 26px; }
+.header p { margin: 5px 0 0 0; color: #ff6b9d; font-weight: bold; font-size: 13px; }
+.badge { display: inline-block; background: #ff6b9d; color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; margin-top: 8px; }
+.card { background: white; border-radius: 20px; padding: 15px; margin: 10px 0; box-shadow: 0 4px 15px rgba(0,0,0,0.07); }
+.card h3 { margin: 0 0 8px 0; font-size: 16px; }
+input { width: 100%; padding: 13px; border-radius: 15px; border: 2px solid #ffd6e7; background: #fff5f9; outline: none; font-size: 14px; }
+input:focus { border-color: #ff6b9d; }
+button { width: 100%; padding: 13px; border-radius: 15px; border: none; font-weight: bold; font-size: 15px; cursor: pointer; margin-top: 8px; }
+.add-btn { background: linear-gradient(90deg, #ff6b9d, #ff9a8b); color: white; box-shadow: 0 4px 12px rgba(255,107,157,0.4); }
+.refresh-btn { background: #aee7ff; color: #00695c; width: auto; padding: 8px 14px; font-size: 13px; }
+.live { color: #ff1744; font-weight: bold; background: #ffe0e0; padding: 3px 10px; border-radius: 20px; font-size: 12px; }
+.wait { color: #ff9800; font-weight: bold; background: #fff3e0; padding: 3px 10px; border-radius: 20px; font-size: 12px; }
+.link { word-break: break-all; color: #7c9eff; font-size: 12px; }
+.video-item { background: #fff5f9; border: 2px dashed #ffb3d1; border-radius: 18px; padding: 12px; margin: 8px 0; }
+.video-item b { font-size: 14px; }
+.watch-btn { background: linear-gradient(90deg, #a18cd1, #fbc2eb); color: white; text-decoration: none; display: block; text-align: center; padding: 10px; border-radius: 12px; font-weight: bold; margin-top: 8px; }
+.time { color: #aaa; font-size: 11px; }
+.tabs { display: flex; gap: 8px; }
+.tab { flex: 1; background: white; text-align: center; padding: 10px; border-radius: 15px; font-weight: bold; font-size: 13px; box-shadow: 0 3px 10px rgba(0,0,0,0.08); }
+</style>
+</head>
+<body>
+<div class="header">
+<h1>🌸🎬 Live Bot 🌸✨</h1>
+<p>💖 Cute Auto Recorder 💖</p>
+<span class="badge">🔴 LIVE = Auto Record ⏺️</span>
+<span class="badge" style="background:#7c9eff">📦 45MB Parts</span>
+</div>
+<div class="tabs">
+<div class="tab">🎀 Watchlist</div>
+<div class="tab">🍿 Videos</div>
+</div>
+<div class="card">
+<h3>➕ ✨ Add New Link ✨📌</h3>
+<input id="newUrl" placeholder="Paste link here... 🔗💕">
+<button class="add-btn" onclick="addLink()">🌸 Add Link 💖✨</button>
+</div>
+<div class="card">
+<h3>👀 Watchlist 🎀 <button class="refresh-btn" onclick="loadAll()">🔄 Refresh</button></h3>
+<div id="list">Loading... 🍭⏳</div>
+</div>
+<div class="card">
+<h3>🍿🎬 Recorded Videos 💕</h3>
+<div id="videos">Loading... 🍓⏳</div>
+</div>
+<script>
+async function loadAll(){
+  let r = await fetch('/api/list');
+  let data = await r.json();
+  let html = '';
+  if(data.length==0) html = '📭 No Links Yet! Add One! 🥺💕';
+  data.forEach((item,i)=>{
+    let st = item.recording ? '<span class=live>🔴 RECORDING ⏺️</span>' : '<span class=wait>💤 Waiting... 🌙</span>';
+    html += `<div class="video-item"><b>🎬 ${item.title}</b><br>${st}<br><span class="link">🔗 ${item.url}</span></div>`;
+  });
+  document.getElementById('list').innerHTML = html;
+  let r2 = await fetch('/api/videos');
+  let vids = await r2.json();
+  let vhtml = '';
+  if(vids.length==0) vhtml = '🥺 No videos yet! Wait for live to start... 🎀';
+  vids.forEach(v=>{
+    vhtml += `<div class="video-item"><b>🎬 ${v.title}</b> <span class="time">🕒 ${v.time}</span><br>📦 Part ${v.part} ✨<br><a class="watch-btn" href="${v.link}" target="_blank">▶️ Watch Now 🍿💖</a></div>`;
+  });
+  document.getElementById('videos').innerHTML = vhtml;
+}
+async function addLink(){
+  let url = document.getElementById('newUrl').value.trim();
+  if(!url) return alert('Please paste a link! 🥺🔗');
+  await fetch('/api/add', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})});
+  document.getElementById('newUrl').value='';
+  loadAll();
+}
+loadAll();
+setInterval(loadAll, 10000);
+</script>
+</body>
+</html>
+"""
+
+@app_web.route('/')
+def home():
+    return DASHBOARD_HTML
+
+@app_web.route('/health')
+def health():
+    return "OK", 200
+
+@app_web.route('/ping')
+def ping():
+    return "Pong! Bot Alive!", 200
+
+@app_web.route('/api/list')
+def api_list():
+    watchlist = load_watchlist()
+    out = []
+    for item in watchlist:
+        out.append({
+            'url': item['url'],
+            'title': item.get('title','Live'),
+            'recording': item['url'] in recording_tasks
+        })
+    return out
+
+@app_web.route('/api/videos')
+def api_videos():
+    return load_videos()
+
+@app_web.route('/api/add', methods=['POST'])
+def api_add():
+    url = request.json.get('url','').strip()
+    if not url:
+        return {'ok': False}
+    watchlist = load_watchlist()
+    for item in watchlist:
+        if item['url'] == url:
+            return {'ok': False, 'msg': 'Already Added'}
+    title, _ = get_title(url)
+    watchlist.append({'url': url, 'title': title})
+    save_watchlist(watchlist)
+    return {'ok': True}
+
+def run_web():
+    app_web.run(host="0.0.0.0", port=PORT)
+
 # =========================================================
-# 👇 yt-dlp -F + -g වලින් වැඩ කරන Quality + m3u8 හොයනවා!
+# yt-dlp -F + -g - Quality + m3u8
 # =========================================================
 def list_formats(url):
     try:
@@ -131,7 +276,7 @@ def pick_best_format(url):
         if combined_720:
             combined_720.sort(key=lambda x: x[1], reverse=True)
             best = combined_720[0]
-            print(f"✅ Format Found via -F: Combined {best[0]} ({best[1]}p)")
+            print(f"Format Found via -F: Combined {best[0]} ({best[1]}p)")
             return best[0]
         videos_720 = [x for x in videos if x[1] <= 720]
         if videos_720:
@@ -140,10 +285,10 @@ def pick_best_format(url):
             v_h = videos_720[0][1]
             if audios:
                 a_id = audios[-1]
-                print(f"✅ Format Found via -F: Video {v_id} ({v_h}p) + Audio {a_id}")
+                print(f"Format Found via -F: Video {v_id} ({v_h}p) + Audio {a_id}")
                 return f"{v_id}+{a_id}"
             else:
-                print(f"✅ Format Found via -F: Video Only {v_id} ({v_h}p)")
+                print(f"Format Found via -F: Video Only {v_id} ({v_h}p)")
                 return v_id
         if videos:
             videos.sort(key=lambda x: x[1])
@@ -154,7 +299,7 @@ def pick_best_format(url):
         if combined:
             combined.sort(key=lambda x: x[1])
             return combined[0][0]
-    print(f"⚠️ -F Parse Failed, Using Fallback Format")
+    print(f"-F Parse Failed, Using Fallback Format")
     return "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
 
 def get_streams(url):
@@ -171,13 +316,13 @@ def get_streams(url):
         if not lines:
             return (None, None)
         if len(lines) >= 2:
-            print(f"✅ Got m3u8 via -g: Video + Audio (2 Links)")
+            print(f"Got m3u8 via -g: Video + Audio (2 Links)")
             return (lines[0], lines[1])
         else:
-            print(f"✅ Got m3u8 via -g: Single Link")
+            print(f"Got m3u8 via -g: Single Link")
             return (lines[0], None)
     except Exception as e:
-        print(f"❌ -g Failed: {e}")
+        print(f"-g Failed: {e}")
         return (None, None)
 
 def get_m3u8_link(url):
@@ -250,7 +395,7 @@ async def record_live(url, title):
     mix_links = []
     fail_count = 0
     os.makedirs('downloads', exist_ok=True)
-    print(f"🔴 Recording Started: {title}")
+    print(f"Recording Started: {title}")
     if bot_app:
         try:
             await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Auto Recording Started... 🚀\n📦 45MB Parts Coming Soon! 🍿\n⚡ Auto Reconnect: 3 Sec 🔄")
@@ -260,9 +405,9 @@ async def record_live(url, title):
         video_url, audio_url = get_streams(url)
         if not video_url:
             fail_count += 1
-            print(f"⚠️ m3u8 Not Found! Retry {fail_count}/10 in 3 sec - {title}")
+            print(f"m3u8 Not Found! Retry {fail_count}/10 in 3 sec - {title}")
             if fail_count >= 10:
-                print(f"🏁 Live Ended: {title}")
+                print(f"Live Ended: {title}")
                 break
             await asyncio.sleep(3)
             continue
@@ -271,7 +416,7 @@ async def record_live(url, title):
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()[:30]
         part_file = f"downloads/{safe_title}_part{part_num}.mp4"
         if audio_url:
-            print(f"🎥 Recording Part {part_num}... [Video+Audio Merge] 🔊")
+            print(f"Recording Part {part_num}... [Video+Audio Merge]")
             cmd = [
                 'ffmpeg', '-y',
                 '-reconnect', '1',
@@ -292,7 +437,7 @@ async def record_live(url, title):
                 part_file
             ]
         else:
-            print(f"🎥 Recording Part {part_num}... [Single Stream]")
+            print(f"Recording Part {part_num}... [Single Stream]")
             cmd = [
                 'ffmpeg', '-y',
                 '-reconnect', '1',
@@ -308,9 +453,9 @@ async def record_live(url, title):
         try:
             subprocess.run(cmd, capture_output=True, timeout=7200)
         except subprocess.TimeoutExpired:
-            print(f"⏰ Part {part_num} Timeout")
+            print(f"Part {part_num} Timeout")
         if not os.path.exists(part_file) or os.path.getsize(part_file) < 100000:
-            print(f"⚠️ Part {part_num} Empty! Retrying in 3 sec... 🔄")
+            print(f"Part {part_num} Empty! Retrying in 3 sec...")
             if os.path.exists(part_file):
                 try:
                     os.remove(part_file)
@@ -322,6 +467,7 @@ async def record_live(url, title):
         link = await upload_part(bot_app.bot, title, part_file, part_num)
         if link:
             mix_links.append(link)
+            save_video(title, part_num, link)
         try:
             os.remove(part_file)
         except:
@@ -338,7 +484,7 @@ async def record_live(url, title):
             await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=text)
         except:
             pass
-    print(f"✅ Recording Finished: {title} - {part_num} Parts")
+    print(f"Recording Finished: {title} - {part_num} Parts")
 
 async def monitor_loop():
     await asyncio.sleep(10)
@@ -363,7 +509,6 @@ async def monitor_loop():
         await asyncio.sleep(10)
 
 async def on_startup(app):
-    # 👇 PTB 21.0 එකට: Bot Start වෙන ගමන් Monitor එක Start වෙනවා!
     asyncio.create_task(monitor_loop())
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -376,7 +521,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 Commands:\n"
         "➕ /add <link> - Add Site 📌\n"
         "📃 /list - List Sites 👀\n"
-        "➖ /remove <link> - Remove Site 🗑️\n"
         "📺 /live - Check Live 🔴\n\n"
         "🔴 Live Started = Auto Record! ⏺️\n"
         "📦 45MB Parts = MixDrop + Channel! ☁️📢\n"
@@ -413,20 +557,6 @@ async def list_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{i}. 🎬 {item.get('title','Live')}\n{status}\n🔗 {item['url']}\n\n"
     await msg.reply_text(text)
 
-async def remove_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not context.args:
-        await msg.reply_text("❌ Usage: /remove <link> 🗑️")
-        return
-    url = context.args[0].strip()
-    watchlist = load_watchlist()
-    new_list = [x for x in watchlist if x['url'] != url]
-    if len(new_list) == len(watchlist):
-        await msg.reply_text("❌ Not Found! 😅")
-        return
-    save_watchlist(new_list)
-    await msg.reply_text(f"✅ Removed! 🗑️\n🔗 {url}")
-
 async def live_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     watchlist = load_watchlist()
@@ -445,17 +575,18 @@ async def live_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     global bot_app
+    # FIX FOR PYTHON 3.14 - TERMUX
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     threading.Thread(target=run_web, daemon=True).start()
     app = ApplicationBuilder().token(TOKEN).build()
     bot_app = app
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add_site))
     app.add_handler(CommandHandler("list", list_sites))
-    app.add_handler(CommandHandler("remove", remove_site))
     app.add_handler(CommandHandler("live", live_now))
-    # 👇 PTB 21.0 Fix: post_init එකෙන් Monitor Start කරනවා
     app.post_init = on_startup
-    print(f"🤖 Bot Started on Port {PORT}... ✨")
+    print(f"Bot Started on Port {PORT}... ✨")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
