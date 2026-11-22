@@ -18,18 +18,25 @@ TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 MIXDROP_API_KEY = os.getenv('MIXDROP_API_KEY')
 MIXDROP_EMAIL = os.getenv('MIXDROP_EMAIL')
-PORT = 10000
+PORT = int(os.getenv('PORT', 10000))
 
 # ==============================
 # 👇 YOUR LINKS HERE - EDIT THIS
 # ==============================
-LINKS = [ "https://www.cam4.com/gelai20",
+LINKS = [
+    "https://www.cam4.com/gelai20",
     "https://bongacams.com/bellacutie69",
     "https://www.cam4.com/sexy_gale",
          "https://chaturbate.com/veola_sexy",
          "https://chaturbate.com/sweet_savii",
          "https://chaturbate.com/your_lovely_kai",
          "https://chaturbate.com/sweety_dianne28",
+"https://bongacams.com/sweetpink061",
+"https://bongacams.com/pinaysweetmommyxx",
+"https://chaturbate.com/sweet_candice97",
+"https://chaturbate.com/lovelyasian_babe",
+"https://chaturbate.com/asuna_charming",
+
 ]
 # ==============================
 
@@ -65,7 +72,6 @@ def load_watchlist():
                     seen.add(item['url'])
         except:
             data = []
-    # 👇 LINKS එකේ තියෙන ඒවාත් එකතු කරනවා
     for url in LINKS:
         if url and url not in seen and "example.com" not in url:
             data.append({'url': url, 'title': 'Live'})
@@ -76,19 +82,40 @@ def save_watchlist(data):
     with open(WATCH_FILE, 'w') as f:
         json.dump(data, f, indent=2)
 
+def get_streams(url):
+    # 👇 VIDEO + AUDIO වෙන් වෙන්ව තියෙන Site වලටත් වැඩ කරන විදිය!
+    # Try 1: Best Video (<=720p) + Best Audio
+    formats_to_try = [
+        'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+        'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
+        'bestvideo+bestaudio/best',
+        'best',
+    ]
+    for fmt in formats_to_try:
+        try:
+            result = subprocess.run(
+                ['yt-dlp', '-g', '--no-warnings', '-f', fmt, url],
+                capture_output=True, text=True, timeout=30
+            )
+            out = result.stdout.strip()
+            if not out:
+                continue
+            lines = [l.strip() for l in out.split('\n') if l.strip().startswith('http')]
+            if not lines:
+                continue
+            if len(lines) >= 2:
+                # Video + Audio දෙකම ලැබුණා!
+                return (lines[0], lines[1])
+            else:
+                # එකම Link එකක Video+Audio දෙකම තියෙනවා!
+                return (lines[0], None)
+        except:
+            continue
+    return (None, None)
+
 def get_m3u8_link(url):
-    try:
-        result = subprocess.run(
-            ['yt-dlp', '-g', '--no-warnings', '-f', 'best[height<=720]/best', url],
-            capture_output=True, text=True, timeout=30
-        )
-        out = result.stdout.strip()
-        if not out:
-            return None
-        m3u8 = out.split('\n')[0]
-        return m3u8 if m3u8.startswith('http') else None
-    except:
-        return None
+    v, a = get_streams(url)
+    return v
 
 def get_title(url):
     try:
@@ -115,18 +142,38 @@ def upload_to_mixdrop(file_path):
 
 async def upload_part(bot, title, part_file, part_num):
     link = upload_to_mixdrop(part_file)
+    thumb_file = part_file.replace(".mp4", "_thumb.jpg")
+    try:
+        subprocess.run(
+            ['ffmpeg', '-y', '-ss', '2', '-i', part_file, '-vframes', '1', '-q:v', '3', thumb_file],
+            capture_output=True, timeout=20
+        )
+        if not os.path.exists(thumb_file):
+            thumb_file = None
+    except:
+        thumb_file = None
     try:
         with open(part_file, 'rb') as vid:
+            thumb = open(thumb_file, 'rb') if thumb_file else None
             await bot.send_video(
                 chat_id=CHANNEL_ID,
                 video=vid,
+                thumbnail=thumb,
+                supports_streaming=True,
                 caption=f"🎬 {title}\n\n📦 Part {part_num} ✨\n💾 45MB | 🔴 LIVE RECORD\n\n❤️ Enjoy! 🍿"
             )
+            if thumb:
+                thumb.close()
     except Exception as e:
         print(f"Telegram Upload Failed: {e}")
         try:
             with open(part_file, 'rb') as doc:
                 await bot.send_document(chat_id=CHANNEL_ID, document=doc, caption=f"🎬 {title} - 📦 Part {part_num} ✨")
+        except:
+            pass
+    if thumb_file and os.path.exists(thumb_file):
+        try:
+            os.remove(thumb_file)
         except:
             pass
     return link
@@ -137,46 +184,66 @@ async def record_live(url, title):
     fail_count = 0
     os.makedirs('downloads', exist_ok=True)
     print(f"🔴 Recording Started: {title}")
-
     if bot_app:
         try:
             await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Auto Recording Started... 🚀\n📦 45MB Parts Coming Soon! 🍿\n⚡ Auto Reconnect: 3 Sec 🔄")
         except:
             pass
-
     while True:
-        m3u8 = get_m3u8_link(url)
-        if not m3u8:
+        video_url, audio_url = get_streams(url)
+        if not video_url:
             fail_count += 1
-            print(f"⚠️ m3u8 Not Found! Retry {fail_count}/10 in 3 sec - {title}")
+            print(f"⚠️ Stream Not Found! Retry {fail_count}/10 in 3 sec - {title}")
             if fail_count >= 10:
                 print(f"🏁 Live Ended: {title}")
                 break
             await asyncio.sleep(3)
             continue
-
         fail_count = 0
         part_num += 1
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()[:30]
         part_file = f"downloads/{safe_title}_part{part_num}.mp4"
 
-        cmd = [
-            'ffmpeg', '-y',
-            '-reconnect', '1',
-            '-reconnect_streamed', '1',
-            '-reconnect_delay_max', '3',
-            '-i', m3u8,
-            '-fs', '45M',
-            '-c', 'copy',
-            '-bsf:a', 'aac_adtstoasc',
-            part_file
-        ]
-        print(f"🎥 Recording Part {part_num}...")
+        # 👇 Audio තියෙනවනම් Video+Audio දෙකම එකට Merge කරනවා!
+        if audio_url:
+            print(f"🎥 Recording Part {part_num}... [Video+Audio Merge] 🔊")
+            cmd = [
+                'ffmpeg', '-y',
+                '-reconnect', '1',
+                '-reconnect_streamed', '1',
+                '-reconnect_delay_max', '3',
+                '-i', video_url,
+                '-reconnect', '1',
+                '-reconnect_streamed', '1',
+                '-reconnect_delay_max', '3',
+                '-i', audio_url,
+                '-map', '0:v:0',
+                '-map', '1:a:0',
+                '-fs', '45M',
+                '-c', 'copy',
+                '-bsf:a', 'aac_adtstoasc',
+                '-movflags', '+faststart',
+                '-shortest',
+                part_file
+            ]
+        else:
+            print(f"🎥 Recording Part {part_num}... [Single Stream]")
+            cmd = [
+                'ffmpeg', '-y',
+                '-reconnect', '1',
+                '-reconnect_streamed', '1',
+                '-reconnect_delay_max', '3',
+                '-i', video_url,
+                '-fs', '45M',
+                '-c', 'copy',
+                '-bsf:a', 'aac_adtstoasc',
+                '-movflags', '+faststart',
+                part_file
+            ]
         try:
             subprocess.run(cmd, capture_output=True, timeout=7200)
         except subprocess.TimeoutExpired:
             print(f"⏰ Part {part_num} Timeout")
-
         if not os.path.exists(part_file) or os.path.getsize(part_file) < 100000:
             print(f"⚠️ Part {part_num} Empty! Retrying in 3 sec... 🔄")
             if os.path.exists(part_file):
@@ -187,18 +254,14 @@ async def record_live(url, title):
             part_num -= 1
             await asyncio.sleep(3)
             continue
-
         link = await upload_part(bot_app.bot, title, part_file, part_num)
         if link:
             mix_links.append(link)
-
         try:
             os.remove(part_file)
         except:
             pass
-
         await asyncio.sleep(3)
-
     if bot_app:
         text = f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n📦 Total Parts: {part_num} 📁\n💾 45MB Each\n\n"
         if mix_links:
