@@ -6,8 +6,7 @@ import json
 import requests
 import subprocess
 import logging
-import datetime
-from flask import Flask, request
+from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 import yt_dlp
@@ -28,13 +27,12 @@ WEBSITE_URL = "https://livestreamrecorder-6nkc.onrender.com"
 # ==============================
 # 👇 YOUR LINKS HERE - EDIT THIS
 # ==============================
-LINKS = [ "https://www.cam4.com/gelai20",
+LINKS = [  "https://www.cam4.com/gelai20",
     "https://bongacams.com/bellacutie69",
     "https://www.cam4.com/sexy_gale",
 "https://bongacams.com/sweetpink061",
 "https://bongacams.com/pinaysweetmommyxx",
 ]
-
 # ==============================
 
 WATCH_FILE = "watchlist.json"
@@ -171,10 +169,11 @@ def api_list():
 
 @app_web.route('/api/videos')
 def api_videos():
-    return load_videos()
+    return {"videos": []}
 
 @app_web.route('/api/add', methods=['POST'])
 def api_add():
+    from flask import request
     url = request.json.get('url', '').strip()
     if not url:
         return {'ok': False}
@@ -193,7 +192,7 @@ def run_web():
 # ==============================
 # JSONBIN - PERMANENT STORAGE
 # ==============================
-_cache = {"watchlist": [], "videos": [], "loaded": False}
+_cache = {"watchlist": [], "loaded": False}
 
 def _bin_headers():
     return {"Content-Type": "application/json", "X-Master-Key": JSONBIN_API_KEY}
@@ -209,9 +208,8 @@ def load_from_bin():
         r = requests.get(f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}/latest", headers=_bin_headers(), timeout=10)
         data = r.json().get("record", {})
         _cache["watchlist"] = data.get("watchlist", [])
-        _cache["videos"] = data.get("videos", [])
         _cache["loaded"] = True
-        print(f"Loaded from JSONBin: {len(_cache['watchlist'])} Links, {len(_cache['videos'])} Videos")
+        print(f"Loaded from JSONBin: {len(_cache['watchlist'])} Links")
     except Exception as e:
         print(f"JSONBin Load Failed: {e}")
         _cache["loaded"] = True
@@ -221,7 +219,7 @@ def save_to_bin():
     if not JSONBIN_API_KEY or not JSONBIN_BIN_ID:
         return
     try:
-        payload = {"watchlist": _cache["watchlist"], "videos": _cache["videos"]}
+        payload = {"watchlist": _cache["watchlist"]}
         requests.put(f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}", headers=_bin_headers(), json=payload, timeout=10)
         print("Saved to JSONBin")
     except Exception as e:
@@ -247,20 +245,6 @@ def save_watchlist(data):
     _cache["watchlist"] = data
     with open(WATCH_FILE, 'w') as f:
         json.dump(data, f, indent=2)
-    save_to_bin()
-
-def load_videos():
-    return load_from_bin()["videos"]
-
-def save_video(title, part_num, mix_link):
-    videos = load_from_bin()["videos"]
-    videos.insert(0, {
-        'title': title,
-        'part': part_num,
-        'link': mix_link,
-        'time': datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    })
-    _cache["videos"] = videos[:100]
     save_to_bin()
 
 def get_m3u8_link(url):
@@ -378,7 +362,6 @@ async def record_live(url, title):
         link = await upload_part(bot_app.bot, title, part_file, part_num)
         if link:
             mix_links.append(link)
-            save_video(title, part_num, link)
 
         try:
             os.remove(part_file)
