@@ -1,0 +1,6 @@
+__pycache__/
+downloads/
+*.mp4
+*.part
+watchlist.json
+.env
