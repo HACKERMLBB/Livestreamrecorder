@@ -1,8 +1,10 @@
 # ============================================================
 # 🌸✨ LiveStream Recorder - 30 Links - ALL AT ONCE! ✨🌸
 # 💖 480p | 📦 5MB Parts | ⚡ 30 Parallel Record + Upload!
-# 🎬 Local Merge - Telegram එකෙන් බාන්නේ නෑ!
-# ✅ .ts Direct | No Convert | No Missing!
+# 🎬 TELEGRAM MERGE - Telegram Part ටිකෙන් Full Video!
+# 💾 100% SAFE - file_id Telegram + File දෙකේම Save!
+# 🔄 Auto Merge After Restart!
+# ☁️ Mixdrop Fix - https://ul.mixdrop.ag/api ✅
 # ============================================================
 
 import os
@@ -65,6 +67,8 @@ CHECK_BATCH = 30
 recording_tasks = {}
 bot_app = None
 upload_stats = {"done": 0}
+sent_parts = {}  # { "Title": [(part_num, file_id), ...] }
+backup_task = None
 
 app_web = Flask(__name__)
 
@@ -81,7 +85,7 @@ async def safe_send(text):
 
 @app_web.route('/')
 def home():
-    return f"🤖 Bot Alive! ✨<br>🎥 Recording: {len(recording_tasks)}/30<br>✅ Uploaded: {upload_stats['done']}<br>⚡ Mode: 30 Parallel | 5MB | Local Merge"
+    return f"🤖 Bot Alive! ✨<br>🎥 Recording: {len(recording_tasks)}/30<br>✅ Uploaded: {upload_stats['done']}<br>📦 Saved Titles: {len(sent_parts)}<br>⚡ Mode: 30 Parallel | 5MB | Telegram Merge | Auto-Restart"
 
 @app_web.route('/health')
 def health():
@@ -89,7 +93,7 @@ def health():
 
 @app_web.route('/api/status')
 def api_status():
-    return jsonify({"done": upload_stats["done"], "recording": len(recording_tasks)})
+    return jsonify({"done": upload_stats["done"], "recording": len(recording_tasks), "saved": len(sent_parts)})
 
 def run_web():
     app_web.run(host="0.0.0.0", port=PORT, threaded=True)
@@ -133,21 +137,81 @@ def get_title(url):
     except:
         return "Live", None
 
+# ============================================================
+# 💾 PERSISTENCE - file_id ටික Save / Load / Telegram Backup!
+# ============================================================
+def save_sent_parts():
+    try:
+        with open("sent_parts.json", "w") as f:
+            json.dump(sent_parts, f)
+        print(f"💾 Saved sent_parts: {len(sent_parts)} titles")
+    except Exception as e:
+        print(f"❌ Save Failed: {e}")
+
+def load_sent_parts():
+    global sent_parts
+    if os.path.exists("sent_parts.json"):
+        try:
+            with open("sent_parts.json") as f:
+                data = json.load(f)
+                sent_parts = {k: [(int(p), fid) for p, fid in v] for k, v in data.items()}
+            print(f"💾 Loaded sent_parts: {len(sent_parts)} titles")
+            for t, v in sent_parts.items():
+                print(f"  🎬 {t} - {len(v)} Parts")
+        except Exception as e:
+            print(f"❌ Load Failed: {e}")
+            sent_parts = {}
+
+async def backup_to_telegram():
+    # 📩 Telegram Channel එකට Backup JSON එක යවනවා! (10s පරක්කුවෙන්, Spam වෙන්නේ නෑ!)
+    # එක දිගට Backup යවන්නේ නෑ! Last Backup එකෙන් තත්පර 30කට පස්සේ විතරයි!
+    global backup_task
+    if backup_task and not backup_task.done():
+        return
+    async def _do():
+        await asyncio.sleep(30)
+        try:
+            save_sent_parts()
+            if not sent_parts:
+                return
+            with open("sent_parts.json", "rb") as doc:
+                await bot_app.bot.send_document(
+                    chat_id=CHANNEL_ID,
+                    document=doc,
+                    filename="sent_parts_backup.json",
+                    caption=f"💾 BACKUP DB 📦✨\n\n🎬 Titles: {len(sent_parts)}\n📦 Total Parts: {sum(len(v) for v in sent_parts.values())}\n\n⚠️ මේක Delete කරන්න එපා! Restart වුණොත් Full Video හදන්න ඕනේ File එක! 💖"
+                )
+            print("💾 Telegram Backup Sent!")
+        except Exception as e:
+            print(f"❌ Telegram Backup Failed: {e}")
+    backup_task = asyncio.create_task(_do())
+
+# ============================================================
+# ☁️ MIXDROP UPLOAD - FIXED URL!
+# ============================================================
 def upload_to_mixdrop(file_path):
     try:
+        print(f"☁️ Mixdrop Uploading: {file_path} | Size: {os.path.getsize(file_path)//1024}KB")
         with open(file_path, 'rb') as f:
             files = {'file': (os.path.basename(file_path), f)}
             data = {'email': MIXDROP_EMAIL, 'key': MIXDROP_API_KEY}
-            r = requests.post("https://api.mixdrop.ag/upload", files=files, data=data, timeout=600)
+            r = requests.post("https://ul.mixdrop.ag/api", files=files, data=data, timeout=600)
+            print(f"☁️ Mixdrop Status: {r.status_code}")
+            print(f"☁️ Mixdrop Response: {r.text[:500]}")
             res = r.json()
             if res.get('success'):
-                return f"https://mixdrop.ag/f/{res['result']['fileref']}"
+                link = f"https://mixdrop.ag/f/{res['result']['fileref']}"
+                print(f"✅ Mixdrop OK: {link}")
+                return link
             print(f"❌ Mixdrop Failed: {res}")
             return None
     except Exception as e:
         print(f"❌ Upload Failed: {e}")
         return None
 
+# ============================================================
+# 🚀 UPLOAD PART - Background! Telegram + Mixdrop!
+# ============================================================
 async def upload_part_now(file_path, title, part_num, is_last=False):
     print(f"📤 [Background] Uploading: {title} Part {part_num} | Size: {os.path.getsize(file_path)//1024}KB")
     try:
@@ -155,12 +219,19 @@ async def upload_part_now(file_path, title, part_num, is_last=False):
         print(f"☁️ Mixdrop Link Part {part_num}: {link}")
         try:
             with open(file_path, 'rb') as doc:
-                await bot_app.bot.send_document(
+                msg = await bot_app.bot.send_document(
                     chat_id=CHANNEL_ID,
                     document=doc,
                     filename=f"{title}_Part{part_num}.ts",
                     caption=f"🎬 {title}\n\n⚡ Part {part_num} ✨\n💾 5MB | 🎥 480p | 🔴 LIVE RECORD\n\n☁️ Mixdrop: {link}\n\n❤️ Enjoy! 🍿"
                 )
+                if title not in sent_parts:
+                    sent_parts[title] = []
+                sent_parts[title].append((part_num, msg.document.file_id))
+                sent_parts[title] = sorted(sent_parts[title])
+                save_sent_parts()  # ✅ File එකේ Save!
+                await backup_to_telegram()  # ✅ Telegram එකෙත් Backup!
+                print(f"✅ Saved file_id Part {part_num} | Total: {len(sent_parts[title])}")
         except Exception as e:
             print(f"❌ Send Failed Part {part_num}: {e}")
             await safe_send(f"🎬 {title} - Part {part_num}\n☁️ Link: {link}")
@@ -169,54 +240,108 @@ async def upload_part_now(file_path, title, part_num, is_last=False):
             await safe_send(f"🏁 LIVE ENDED! 🎬✨\n\n🎥 {title}\n\n✅ All Parts Uploaded! 💖\n🎬 Full Video හදනවා... ⏳")
     except Exception as e:
         print(f"❌ Upload Part Error {part_num}: {e}")
+    finally:
+        try:
+            os.remove(file_path)
+            print(f"🗑️ Deleted Local: {file_path}")
+        except:
+            pass
 
-async def merge_local_full_video(all_parts, title):
-    if not all_parts or len(all_parts) < 2:
-        print(f"⚠️ Merge Skip: Parts අඩුයි! {title} - {len(all_parts)}")
-        for pf in all_parts:
-            try: os.remove(pf)
-            except: pass
+# ============================================================
+# 🎬 TELEGRAM MERGE - Telegram Part ටිකෙන් Full Video!
+# ============================================================
+async def merge_from_telegram(title):
+    if title not in sent_parts or len(sent_parts[title]) < 2:
+        print(f"⚠️ Merge Skip: Parts අඩුයි! {title} - {len(sent_parts.get(title, []))}")
         return
-    print(f"🎬 Local Merge Start: {title} | Parts: {len(all_parts)}")
-    await safe_send(f"🎬 Full Video හදනවා... ⏳✨\n\n🎥 {title}\n📦 Parts: {len(all_parts)}\n⏳ Local Part ටික එකතු කරනවා... 💖")
+    file_ids = sorted(sent_parts[title])
+    print(f"🎬 Telegram Merge Start: {title} | Parts: {len(file_ids)}")
+    await safe_send(f"🎬 Full Video හදනවා... ⏳✨\n\n🎥 {title}\n📦 Parts: {len(file_ids)}\n⏳ Telegram එකෙන් බාගෙන එකතු කරනවා... 💖")
+    os.makedirs('merge', exist_ok=True)
     safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()[:30]
-    full_path = f"downloads/{safe_title}_FULL.ts"
+    full_path = f"merge/{safe_title}_FULL.ts"
     try:
         with open(full_path, 'wb') as out:
-            for pf in sorted(all_parts):
-                if os.path.exists(pf):
-                    with open(pf, 'rb') as f:
+            for part_num, fid in file_ids:
+                try:
+                    print(f"📥 Downloading Part {part_num} from Telegram...")
+                    f = await bot_app.bot.get_file(fid)
+                    tmp = f"merge/tmp_{part_num}.ts"
+                    await f.download_to_drive(tmp)
+                    with open(tmp, 'rb') as tf:
                         while True:
-                            chunk = f.read(1024*1024)
+                            chunk = tf.read(1024*1024)
                             if not chunk:
                                 break
                             out.write(chunk)
-                    print(f"  ✅ Added: {pf}")
-        size = os.path.getsize(full_path) // 1024 // 1024
-        print(f"✅ Full Video Ready: {size}MB")
+                    os.remove(tmp)
+                    print(f"✅ Merged Part {part_num}")
+                except Exception as e:
+                    print(f"❌ Merge Part {part_num} Failed: {e}")
+        size_mb = os.path.getsize(full_path) // 1024 // 1024
+        print(f"✅ Full Video Ready: {size_mb}MB")
         link = await asyncio.to_thread(upload_to_mixdrop, full_path)
-        await safe_send(
-            f"🎬 FULL VIDEO READY! 🍿✨\n\n"
-            f"🎥 {title}\n📦 Total Parts: {len(all_parts)}\n💾 Size: {size}MB\n\n"
-            f"☁️ Full Video Link:\n{link}\n\n❤️ Enjoy Full Video! 💖"
-        )
+        print(f"☁️ Full Video Mixdrop Link: {link}")
+        if link:
+            await safe_send(f"🎬 FULL VIDEO READY! 🍿✨\n\n🎥 {title}\n📦 Total Parts: {len(file_ids)}\n💾 Size: {size_mb}MB\n\n☁️ Full Video Link:\n{link}\n\n❤️ Enjoy Full Video! 💖")
+        else:
+            await safe_send(f"❌ Full Video Mixdrop Upload Failed! 🎥 {title}\n📦 Parts: {len(file_ids)}\n⚠️ Mixdrop Email / Key Check කරන්න!")
     except Exception as e:
-        print(f"❌ Merge Failed: {e}")
-        await safe_send(f"❌ Full Video Failed: {title}")
+        print(f"❌ Telegram Merge Failed: {e}")
+        await safe_send(f"❌ Full Video Failed: {title}\nError: {e}")
     finally:
-        try: os.remove(full_path)
-        except: pass
-        for pf in all_parts:
-            try: os.remove(pf)
-            except: pass
+        try:
+            os.remove(full_path)
+        except:
+            pass
+        sent_parts.pop(title, None)
+        save_sent_parts()
+        await backup_to_telegram()
 
+# ============================================================
+# 🔄 AUTO MERGE AFTER RESTART!
+# ============================================================
+async def auto_merge_after_restart():
+    await asyncio.sleep(10)
+    if not sent_parts:
+        print("✅ No saved parts - No Auto Merge needed!")
+        return
+    print(f"🔄 Restart Detected! Checking {len(sent_parts)} titles for Auto Merge...")
+    await safe_send(f"🔄 Bot Restart වුණා! 🤖✨\n\n📦 කලින් Part ටික Check කරනවා... ⏳\n🎬 Titles: {len(sent_parts)}")
+    watchlist = load_watchlist()
+    for title in list(sent_parts.keys()):
+        url = None
+        for item in watchlist:
+            if title.lower() in item.get('title', '').lower() or item.get('title', '').lower() in title.lower() or title.lower()[:20] in item.get('title', '').lower():
+                url = item['url']
+                break
+        is_live = False
+        if url:
+            try:
+                is_live = get_m3u8_link(url) is not None
+            except:
+                is_live = False
+        # Watchlist එකේ නැත්නම්, Title එකෙන්ම Live ද කියලා හොයන්න බෑ, ඒ නිසා Auto Merge කරනවා!
+        # (Watchlist එකේ තියෙන ඒවා විතරක් Live Check කරනවා!)
+        if not url:
+            print(f"⚠️ URL Not Found for {title} -> Auto Merge (Safe)!")
+            is_live = False
+        if not is_live:
+            print(f"🏁 Live Ended: {title} -> Auto Merge Start!")
+            await safe_send(f"🏁 {title} Live ඉවරයි! 🎬\n\n📥 Telegram Part ටිකෙන් Full Video හදනවා... ⏳")
+            await merge_from_telegram(title)
+        else:
+            print(f"🔴 Still Live: {title} -> Merge Skip, Record Continue!")
+
+# ============================================================
+# 🔴 RECORD - 30 Parallel!
+# ============================================================
 async def record_live_light(url, title):
     part_num = 0
     fail_count = 0
     part_file = None
     seen_segments = set()
     upload_tasks = []
-    all_parts = []
     os.makedirs('downloads', exist_ok=True)
     print(f"🔴 Start Recording: {title}")
     await safe_send(f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Recording... 🚀\n⚡ 5MB Parts | 🎥 480p | 📄 .ts Direct! 🍿")
@@ -248,7 +373,6 @@ async def record_live_light(url, title):
             seen_segments.add(seg_url)
             if part_num == 0 or not part_file or not os.path.exists(part_file) or os.path.getsize(part_file) >= PART_SIZE:
                 if part_num > 0 and part_file and os.path.exists(part_file):
-                    all_parts.append(part_file)
                     task = asyncio.create_task(upload_part_now(part_file, title, part_num, is_last=False))
                     upload_tasks.append(task)
                     print(f"🚀 Part {part_num} Background Upload! Record Continuing... ⚡")
@@ -269,16 +393,18 @@ async def record_live_light(url, title):
         if len(seen_segments) > 2000:
             seen_segments.clear()
     if part_num > 0 and part_file and os.path.exists(part_file) and os.path.getsize(part_file) > 100000:
-        all_parts.append(part_file)
         task = asyncio.create_task(upload_part_now(part_file, title, part_num, is_last=True))
         upload_tasks.append(task)
     print(f"⏳ Waiting for {len(upload_tasks)} Uploads: {title} ...")
     if upload_tasks:
         await asyncio.gather(*upload_tasks, return_exceptions=True)
     print(f"✅ All Uploads Done: {title}")
-    await merge_local_full_video(all_parts, title)
-    print(f"✅ Record + Merge Finished: {title}")
+    await merge_from_telegram(title)
+    print(f"✅ Record + Telegram Merge Finished: {title}")
 
+# ============================================================
+# 👀 MONITOR - 30ම එක පාර Check!
+# ============================================================
 async def monitor_loop():
     await asyncio.sleep(5)
     while True:
@@ -298,18 +424,22 @@ async def monitor_loop():
                         task = asyncio.create_task(record_live_light(url, title))
                         recording_tasks[url] = task
                         task.add_done_callback(lambda t, u=url: recording_tasks.pop(u, None))
-                        print(f"🔴 Started: {title} | Total Recording: {len(recording_tasks)}/30")
+                        print(f"🔴 Started: {title} | Total: {len(recording_tasks)}/30")
         except Exception as e:
             print(f"⚠️ Monitor Error: {e}")
         await asyncio.sleep(5)
 
+# ============================================================
+# 🤖 COMMANDS
+# ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome! 🤖✨\n\n🎬 30 Links Auto Record Bot! 🍿\n\n"
         "⚡ 30 Parallel! | 5MB Parts | 🎥 480p\n"
         "⚡ Record + Upload Parallel!\n"
-        "🎬 Local Merge - Full Video!\n\n"
-        "📋 Commands:\n📃 /list - List Links 👀\n📺 /live - Check Live 🔴"
+        "🎬 Telegram Merge - Full Video!\n"
+        "💾 Auto Backup + Auto Merge After Restart!\n\n"
+        "📋 Commands:\n📃 /list - List Links 👀\n📺 /live - Check Live 🔴\n🎬 /merge - Manual Merge\n💾 /backup - Backup Now"
     )
 
 async def list_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -329,8 +459,34 @@ async def live_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{'🔴 LIVE' if m else '⚪ OFFLINE'} - 🎬 {item.get('title', 'Live')}\n"
     await update.message.reply_text(text)
 
+async def merge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        titles = "\n".join([f"🎬 {t} - 📦 {len(v)} Parts" for t, v in sent_parts.items()])
+        await update.message.reply_text(f"📋 Merge කරන්න පුළුවන්:\n\n{titles or '📭 තාම Part නෑ!'}\n\n👉 Use: /merge Title එක")
+        return
+    title_q = " ".join(context.args)
+    found = None
+    for t in sent_parts:
+        if title_q.lower() in t.lower():
+            found = t
+            break
+    if not found:
+        await update.message.reply_text(f"❌ '{title_q}' හම්බුනේ නෑ!")
+        return
+    await merge_from_telegram(found)
+
+async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_sent_parts()
+    try:
+        with open("sent_parts.json", "rb") as doc:
+            await update.message.reply_document(document=doc, filename="sent_parts_backup.json", caption=f"💾 Backup! 🎬 Titles: {len(sent_parts)}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Backup Failed: {e}")
+
 async def post_init(app):
+    load_sent_parts()
     asyncio.create_task(monitor_loop())
+    asyncio.create_task(auto_merge_after_restart())
 
 def main():
     global bot_app
@@ -345,7 +501,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_sites))
     app.add_handler(CommandHandler("live", live_now))
-    print(f"🤖 Bot Started! ✨ 30 Parallel | 5MB | Local Merge | Port {PORT} 🚀")
+    app.add_handler(CommandHandler("merge", merge_cmd))
+    app.add_handler(CommandHandler("backup", backup_cmd))
+    print(f"🤖 Bot Started! ✨ 30 Parallel | 5MB | Telegram Merge | Auto-Restart Merge | Mixdrop Fixed | Port {PORT} 🚀")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
