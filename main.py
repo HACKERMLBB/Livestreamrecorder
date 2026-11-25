@@ -78,7 +78,7 @@ def save_watchlist(data):
 def get_m3u8_link(url):
     try:
         result = subprocess.run(
-            ['yt-dlp', '-g', '--no-warnings', '-f', 'best[height<=720]/best', url],
+            ['yt-dlp', '-g', '--no-warnings', '-f', 'best[height<=480]/best', url],
             capture_output=True, text=True, timeout=30
         )
         out = result.stdout.strip()
