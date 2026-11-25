@@ -28,6 +28,8 @@ LINKS = [ "https://www.cam4.com/gelai20",
     "https://www.cam4.com/urpinaychelsea",
 "https://www.cam4.com/ruch_fantasex",
 "https://bongacams.com/AlexaBrown12",
+         "https://bongacams.com/Natashaa-",
+         "https://bongacams.com/patismith",
 ]
 # ==============================
 
