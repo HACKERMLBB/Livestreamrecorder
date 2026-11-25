@@ -26,7 +26,7 @@ PORT = 10000
 LINKS = [ "https://bongacams.com/Natashaa-",
 "https://bongacams.com/",
 "https://www.cam4.com/gelai20",
-"https://bongacams.com/",
+"https://bongacams.com/AlexaBrown12",
          
          
 ]
