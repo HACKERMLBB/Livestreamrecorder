@@ -23,20 +23,10 @@ PORT = 10000
 # ==============================
 # 👇 YOUR LINKS HERE - EDIT THIS
 # ==============================
-LINKS = [ "https://www.cam4.com/gelai20",
-    "https://bongacams.com/bellacutie69",
-    "https://www.cam4.com/urpinaychelsea",
-"https://www.cam4.com/ruch_fantasex",
+LINKS = [ "https://bongacams.com/Natashaa-",
+"https://bongacams.com/fullshow69",
+"https://www.cam4.com/gelai20",
 "https://bongacams.com/AlexaBrown12",
-         "https://bongacams.com/Natashaa-",
-         "https://bongacams.com/patismith",
-         "https://www.cam4.com/ella_sexyasian",
-         "https://bongacams.com/fullshow69",
-         "https://bongacams.com/EmySandoval",
-         "https://bongacams.com/marianaxx",
-    "https://bongacams.com/Lexy-tay",
-    "https://www.cam4.com/violet_smileex",
-         "https://bongacams.com/dakotamilf-hot",
          
          
 ]
@@ -325,6 +315,33 @@ async def live_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"⚪ OFFLINE - 🎬 {item.get('title','Live')}\n"
     await msg.reply_text(text)
 
+# ======================================================
+# 👇 අලුතින් එකතු කරපු එක විතරයි - VIDEO -> CHANNEL
+# ======================================================
+async def handle_user_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg:
+        return
+    try:
+        # Video එකක් විදියට එව්වොත්
+        if msg.video:
+            await context.bot.send_video(
+                chat_id=CHANNEL_ID,
+                video=msg.video.file_id,
+                caption=None
+            )
+        # File එකක් විදියට එව්වොත් (Document video)
+        elif msg.document and msg.document.mime_type and msg.document.mime_type.startswith('video'):
+            await context.bot.send_document(
+                chat_id=CHANNEL_ID,
+                document=msg.document.file_id,
+                caption=None
+            )
+        else:
+            return
+    except Exception as e:
+        print(f"Video Forward Failed: {e}")
+
 def main():
     global bot_app
     threading.Thread(target=run_web, daemon=True).start()
@@ -335,6 +352,8 @@ def main():
     app.add_handler(CommandHandler("list", list_sites))
     app.add_handler(CommandHandler("remove", remove_site))
     app.add_handler(CommandHandler("live", live_now))
+    # 👇 අලුතින් එකතු කරපු handler එක විතරයි
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_user_video))
     print(f"🤖 Bot Started on Port {PORT}... ✨")
     loop = asyncio.get_event_loop()
     loop.create_task(monitor_loop())
