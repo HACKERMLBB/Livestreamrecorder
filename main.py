@@ -24,7 +24,7 @@ PORT = 10000
 # 👇 YOUR LINKS HERE - EDIT THIS
 # ==============================
 LINKS = [ "https://bongacams.com/Natashaa-",
-"https://bongacams.com/fullshow69",
+"https://bongacams.com/",
 "https://www.cam4.com/gelai20",
 "https://bongacams.com/",
          
