@@ -38,6 +38,8 @@ LINKS = [ "https://bongacams.com/Natashaa-",
          "https://www.camsoda.com/aliceluna",
          "https://www.camsoda.com/kinkyhousewifee",
          "https://www.camsoda.com/yessikabustamante",
+"https://chaturbate.com/lunarosex5",
+
 
          
          
@@ -90,7 +92,8 @@ def save_watchlist(data):
 def get_m3u8_link(url):
     try:
         result = subprocess.run(
-            ['yt-dlp', '-g', '--no-warnings', '-f', 'best[height<=480]/best', url],
+            ['yt-dlp', '-g', '--no-warnings', '--no-playlist',
+             '-S', 'res:480', url],
             capture_output=True, text=True, timeout=30
         )
         out = result.stdout.strip()
