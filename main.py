@@ -34,15 +34,11 @@ LINKS = [ "https://bongacams.com/Natashaa-",
     "https://www.cam4.com/violet_smileex",
          "https://bongacams.com/dakotamilf-hot",
          "https://chaturbate.com/marycollinss",
-         "https://chaturbate.com/aisha_funny/",
+         "https://chaturbate.com/aisha_funny",
          "https://www.camsoda.com/aliceluna",
          "https://www.camsoda.com/kinkyhousewifee",
          "https://www.camsoda.com/yessikabustamante",
 "https://chaturbate.com/lunarosex5",
-
-
-         
-         
 ]
 # ==============================
 
@@ -78,7 +74,6 @@ def load_watchlist():
                     seen.add(item['url'])
         except:
             data = []
-    # 👇 LINKS එකේ තියෙන ඒවාත් එකතු කරනවා
     for url in LINKS:
         if url and url not in seen and "example.com" not in url:
             data.append({'url': url, 'title': 'Live'})
@@ -89,20 +84,21 @@ def save_watchlist(data):
     with open(WATCH_FILE, 'w') as f:
         json.dump(data, f, indent=2)
 
-def get_m3u8_link(url):
+def get_m3u8_links(url):
+    # 360p STRICT - කවදාවත් 360 ට වඩා උඩට යන්නේ නෑ
+    # 360 නැත්තන් 240 -> 144 -> අඩුම එක
     try:
         result = subprocess.run(
-            ['yt-dlp', '-g', '--no-warnings', '--no-playlist',
-             '-S', 'res:480', url],
+            ['yt-dlp', '-g', '--no-warnings', '-f', 'best[height<=360]/best[height<=240]/best[height<=144]/worst', url],
             capture_output=True, text=True, timeout=30
         )
         out = result.stdout.strip()
         if not out:
-            return None
-        m3u8 = out.split('\n')[0]
-        return m3u8 if m3u8.startswith('http') else None
+            return []
+        links = [l.strip() for l in out.split('\n') if l.strip().startswith('http')]
+        return links
     except:
-        return None
+        return []
 
 def get_title(url):
     try:
@@ -113,7 +109,7 @@ def get_title(url):
         return "Live", None
 
 # ======================================================
-# 🔥 MIXDROP UPLOAD - මේක විතරයි හදලා තියෙන්නේ ✅
+# 🔥 MIXDROP UPLOAD
 # ======================================================
 def upload_to_mixdrop(file_path):
     try:
@@ -159,13 +155,13 @@ async def record_live(url, title):
 
     if bot_app:
         try:
-            await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Auto Recording Started... 🚀\n📦 45MB Parts Coming Soon! 🍿\n⚡ Auto Reconnect: 3 Sec 🔄")
+            await bot_app.bot.send_message(chat_id=CHANNEL_ID, text=f"🔴 LIVE STARTED! 🎬✨\n\n🎥 {title}\n\n⏺️ Auto Recording Started... 🚀\n📦 45MB Parts Coming Soon! 🍿\n🎞️ Quality: Max 360p\n⚡ Auto Reconnect: 3 Sec 🔄")
         except:
             pass
 
     while True:
-        m3u8 = get_m3u8_link(url)
-        if not m3u8:
+        links = get_m3u8_links(url)
+        if not links:
             fail_count += 1
             print(f"⚠️ m3u8 Not Found! Retry {fail_count}/10 in 3 sec - {title}")
             if fail_count >= 10:
@@ -179,18 +175,29 @@ async def record_live(url, title):
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()[:30]
         part_file = f"downloads/{safe_title}_part{part_num}.mp4"
 
+        # Audio + Video වෙන්වම ආවොත් 2ම ffmpeg එකට දෙනවා
         cmd = [
             'ffmpeg', '-y',
             '-reconnect', '1',
             '-reconnect_streamed', '1',
             '-reconnect_delay_max', '3',
-            '-i', m3u8,
+        ]
+        for link in links:
+            cmd += ['-i', link]
+
+        # Input 2ක් තියෙනවා නම් video=0, audio=1 map කරනවා
+        if len(links) >= 2:
+            cmd += ['-map', '0:v:0', '-map', '1:a:0']
+        else:
+            cmd += ['-map', '0']
+
+        cmd += [
             '-fs', '45M',
             '-c', 'copy',
             '-bsf:a', 'aac_adtstoasc',
             part_file
         ]
-        print(f"🎥 Recording Part {part_num}...")
+        print(f"🎥 Recording Part {part_num}... Inputs: {len(links)}")
         try:
             subprocess.run(cmd, capture_output=True, timeout=7200)
         except subprocess.TimeoutExpired:
@@ -241,8 +248,8 @@ async def monitor_loop():
                 title = item.get('title', 'Live')
                 if url in recording_tasks:
                     continue
-                m3u8 = get_m3u8_link(url)
-                if m3u8:
+                links = get_m3u8_links(url)
+                if links:
                     real_title, _ = get_title(url)
                     if real_title and real_title != "Live":
                         title = real_title
@@ -267,6 +274,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📺 /live - Check Live 🔴\n\n"
         "🔴 Live Started = Auto Record! ⏺️\n"
         "📦 45MB Parts = MixDrop + Channel! ☁️📢\n"
+        "🎞️ Quality: Max 360p\n"
         "⚡ Broken? 3 Sec Auto Reconnect! 🔄\n"
         "🏁 Live End = Auto Stop! ✅\n\n"
         "🚀 Ready! Send /add to Start! ✨"
@@ -323,39 +331,12 @@ async def live_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text("🔍 Checking Live... ⏳✨")
     text = "📺 Live Status: 👀\n\n"
     for item in watchlist:
-        m3u8 = get_m3u8_link(item['url'])
-        if m3u8:
+        links = get_m3u8_links(item['url'])
+        if links:
             text += f"🔴 LIVE - 🎬 {item.get('title','Live')}\n"
         else:
             text += f"⚪ OFFLINE - 🎬 {item.get('title','Live')}\n"
     await msg.reply_text(text)
-
-# ======================================================
-# 👇 අලුතින් එකතු කරපු එක විතරයි - VIDEO -> CHANNEL
-# ======================================================
-async def handle_user_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg:
-        return
-    try:
-        # Video එකක් විදියට එව්වොත්
-        if msg.video:
-            await context.bot.send_video(
-                chat_id=CHANNEL_ID,
-                video=msg.video.file_id,
-                caption=None
-            )
-        # File එකක් විදියට එව්වොත් (Document video)
-        elif msg.document and msg.document.mime_type and msg.document.mime_type.startswith('video'):
-            await context.bot.send_document(
-                chat_id=CHANNEL_ID,
-                document=msg.document.file_id,
-                caption=None
-            )
-        else:
-            return
-    except Exception as e:
-        print(f"Video Forward Failed: {e}")
 
 def main():
     global bot_app
@@ -367,8 +348,6 @@ def main():
     app.add_handler(CommandHandler("list", list_sites))
     app.add_handler(CommandHandler("remove", remove_site))
     app.add_handler(CommandHandler("live", live_now))
-    # 👇 අලුතින් එකතු කරපු handler එක විතරයි
-    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_user_video))
     print(f"🤖 Bot Started on Port {PORT}... ✨")
     loop = asyncio.get_event_loop()
     loop.create_task(monitor_loop())
