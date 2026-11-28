@@ -89,7 +89,7 @@ def get_m3u8_links(url):
     # 360 නැත්තන් 240 -> 144 -> අඩුම එක
     try:
         result = subprocess.run(
-            ['yt-dlp', '-g', '--no-warnings', '-f', 'best[height<=360]/best[height<=240]/best[height<=144]/worst', url],
+            ['yt-dlp', '-g', '--no-warnings', '-f', 'best[height<=540]/best[height<=240]/best[height<=144]/worst', url],
             capture_output=True, text=True, timeout=30
         )
         out = result.stdout.strip()
